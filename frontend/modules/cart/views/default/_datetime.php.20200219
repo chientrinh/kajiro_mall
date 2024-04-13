@@ -1,0 +1,83 @@
+<?php
+/**
+ * @link    $URL: https://tarax.toyouke.com/svn/MALL/frontend/modules/cart/views/default/_datetime.php $
+ * @version $Id: _datetime.php 3796 2017-12-23 08:39:36Z naito $
+ *
+ * $model 
+ */
+
+use \yii\helpers\Html;
+use \yii\widgets\ActiveForm;
+
+$timeModel = new \common\models\DeliveryTime();
+$drop1 = $model->dateCandidates;
+array_unshift($drop1, "指定なし");
+
+// ヤマトが12時〜14時指定を廃止した。time_id 2を除外したいがarray_unshiftやarray_mergeを使用すると数値添え字が振り直しになり値との対応が狂うので注意　2017/06/15
+$drop2 = \yii\helpers\ArrayHelper::map($timeModel->yamato, 'time_id', 'name');
+$array = ['0' => "指定なし"];
+$drop2 = $array + $drop2;
+?>
+
+<h1 class="mainTitle">配達日時の指定</h1>
+<p class="mainLead">
+ご注文の商品をお届けする日時が指定できます。
+</p>
+
+<?php $form = ActiveForm::begin([
+  'id' => 'cart-update-datetime',
+  'validateOnBlur'  => true,
+  'validateOnChange'=> true,
+  'validateOnSubmit'=> true,
+  'fieldConfig' => [
+      'template' => '{input}{hint}{error}',
+  ],
+]);?>
+
+<table summary="会員登録" id="FormTable" class="table table-bordered">
+<tbody>
+
+    <tr>
+    <th><div><label>お届け先</label></div></th>
+    <td>
+        <p>
+            〒<?= $cart->delivery->zip ?>
+            <?= $cart->delivery->addr ?>
+        </p>
+        <p>
+            <?= $cart->delivery->name ?> 様
+        </p>
+    </td>
+    </tr>
+
+    <tr>
+    <th><div><label><?=$model->getAttributeLabel('date')?></label></div></th>
+    <td>
+        <?= $form->field($model, 'date')->dropDownList($drop1) ?>
+    </td>
+    </tr>
+
+    <tr>
+    <th><div><label><?=$model->getAttributeLabel('time_id')?></label></div></th>
+    <td>
+        <?= $form->field($model, 'time_id')->dropDownList($drop2) ?>
+    </td>
+    </tr>
+
+</tbody>
+</table>
+
+<?= Html::submitButton("更新", [
+        'class' => 'btn btn-primary',
+        'name'  => 'scenario',
+        'value' => 'default',
+    ]) ?>
+
+<?php ActiveForm::end(); ?>
+
+<p class="help-block">
+<?= $model->toCustomerMessage ?>
+ご希望があればお届け日時を指定してください。
+</p>
+
+

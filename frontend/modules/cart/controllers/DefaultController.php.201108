@@ -1,0 +1,625 @@
+<?php
+/**
+ * $URL: https://tarax.toyouke.com/svn/MALL/frontend/modules/cart/controllers/DefaultController.php $
+ * $Id: DefaultController.php 4082 2018-12-19 06:29:32Z mori $
+ */
+
+namespace frontend\modules\cart\controllers;
+
+use Yii;
+use \common\models\CustomerGrade;
+use \common\models\Payment;
+use \common\models\Purchase;
+use common\models\Stock;
+use common\models\Campaign;
+use common\models\StreamingBuy;
+
+class DefaultController extends \yii\web\Controller implements \yii\base\ViewContextInterface
+{
+    const TARGET_ADDRBOOK= 'addrbook';
+    const TARGET_ADDRESS = 'address';
+    const TARGET_CAMPAIGN = 'campaign';
+    const TARGET_CAMPAIGN_DEL = 'campaign-del';
+    const TARGET_AGENT = 'agent';
+    const TARGET_AGENT_DEL = 'agent-del';
+    const TARGET_DATE    = 'date';
+    const TARGET_GIFT    = 'gift';
+    const TARGET_MSG     = 'msg';
+    const TARGET_PAYMENT = 'payment';
+    const TARGET_POINT   = 'point';
+    const TARGET_QTY     = 'qty';
+
+    public $defaultAction = 'index';
+    private $_backUrl;
+
+    public function behaviors()
+    {
+        return [
+            'access' => [
+                'class' => \yii\filters\AccessControl::className(),
+                'rules' => [
+                    [
+                        'actions'=> ['index'],
+                        'allow'  => true,
+                        'verbs'  => ['GET'],
+                    ],
+                    [
+                        'actions'=> ['add','del','update','recipedel', 'get-live-product-all', 'put-product', 'put-remedy','put-live-product-all'],
+                        'allow'  => true,
+                        'verbs'  => ['GET','POST'],
+                    ],
+                    [
+                        'actions'=> ['finish', 'agreement', 'text-agreement'],
+                        'allow'  => true,
+                        'verbs'  => ['GET','POST'],
+                    ],
+                    [
+                        'allow'  => false, // everything else is denied
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    public function init()
+    {
+        parent::init();
+
+        $this->_backUrl = Yii::$app->request->referrer
+                        ? Yii::$app->request->referrer
+                        : \yii\helpers\Url::toRoute(sprintf('/%s/%s/index', $this->module->id, $this->module->defaultRoute));
+    }
+
+    public function beforeAction($action)
+    {
+        if(! parent::beforeAction($action))
+            return false;
+
+        if(('index' == $action->id) ||
+           (Yii::$app->request->isGet && ('update' == $action->id) && ('payment' == Yii::$app->request->get('target')))
+        )
+            $this->applyPaymentFilter();
+
+
+        // キャンペーン対象のライブ配信チケット購入済みかチェックし、カートにキャンペーンを自動セットする 2020/09/30 : kawai
+        if(!Yii::$app->user->isGuest)
+            $this->checkLiveCampaign();
+
+        return true;
+    }
+
+    public function actionIndex($cart_idx=null)
+    {
+        $carts = $this->module->cart->activeCarts;
+
+        if(0 == count($carts))
+        {
+            // show empty cart
+            $cart_idx = 0;
+            $carts[$cart_idx]  = $this->module->cart->getCart($cart_idx);
+        }
+        if(! in_array($cart_idx, array_keys($carts)))
+            $cart_idx = min(array_keys($carts));
+        else
+            $cart_idx = (int) $cart_idx;
+
+        $items = $carts[$cart_idx]->items;
+        foreach($items as $item)
+        {
+            $m = $item->model;
+            // 野菜セットMの場合、dtb_stock上の在庫確認を行う(併せてバージョン取得)
+            if (method_exists ($m, 'hasAttribute') && $m->hasAttribute('product_id')){// && $m->product_id == Stock::VEGETABLE_SETM) {
+
+                // 野菜セットMの場合はStockテーブルの在庫数の取得、更新
+                $stock = $this->module->stock->getStock($m->product_id);
+
+                if ($stock && $stock->actual_qty < 1 ) {
+
+                    $m->in_stock = 0;
+                }
+            }
+        }
+
+
+        $purchase = $carts[$cart_idx]->getPurchase();
+//        var_dump($purchase->customer->name);exit;
+        if($this->module->customer && isset($purchase)) {
+            $campaign = $purchase->campaign;
+            if($campaign && $campaign->status == 0){
+                $this->module->unsetCampaign($cart_idx);
+            }
+        }
+
+        return $this->render('index', [
+            'customer' => $this->module->customer,
+            'carts'    => $carts,
+            'cart_idx' => $cart_idx,
+        ]);
+    }
+
+    public function actionAdd($pid, $qty=1)
+    {
+        $qty = (int) trim(mb_convert_kana($qty, 'ns'));
+        if($qty <= 0)
+            throw new \yii\base\UserException("追加数量($qty)が不正です");
+
+        $param = [
+            'qty'       => $qty,
+            'sku_color' => Yii::$app->request->get('sku_color', null),
+            'sku_size'  => Yii::$app->request->get('sku_size',  null),
+        ];
+
+        $this->module->addProduct($pid, $param);
+
+        if(Yii::$app->request->isAjax &&
+           Yii::$app->session->removeFlash('success'))
+               return $qty; // ok
+
+        if (Yii::$app->request->get('sp_product')) {
+            //特典商品一覧画面に飛ばす
+            $this->redirect(['/ty/subcategory', 'id' => \common\models\Subcategory::PKEY_MAGAZINE_CAMPAIGN]);
+            return;
+        }
+        $this->redirect($this->_backUrl);
+    }
+
+    /**
+     * @param $c cart index
+     * @param $i item index
+     */
+    public function actionDel($cart_idx, $item_idx)
+    {
+        $this->module->del($cart_idx, $item_idx);
+
+        $this->redirect($this->_backUrl);
+    }
+    
+    public function actionRecipedel($cart_idx,$recipe_id)
+    {
+        $this->module->recipeDel($cart_idx, $recipe_id);
+
+        $this->redirect($this->_backUrl);
+    }
+    
+
+    public function actionUpdate($cart_idx, $target)
+    {
+        if(! $cart = $this->module->cart->getCart($cart_idx))
+            throw new \yii\web\NotFoundHttpException('invalid param: cart_idx');
+
+        // キャンペーンコードを元に、キャンペーン適用
+        if(self::TARGET_CAMPAIGN == $target)
+        {
+            //$post = Yii::$app->request->post('PurchaseForm',null);
+            return $this->updateCampaign($cart_idx, Yii::$app->request);
+        }
+
+        // キャンペーンコードを元に、キャンペーン解除
+        if(self::TARGET_CAMPAIGN_DEL == $target)
+        {
+            //$post = Yii::$app->request->post('PurchaseForm',null);
+            return $this->unsetCampaign($cart_idx);
+        }
+
+        // サポート注文適用
+        if(self::TARGET_AGENT == $target)
+        {
+            return $this->updateAgent($cart_idx, Yii::$app->request);
+        }
+
+        // サポート注文解除
+        if(self::TARGET_AGENT_DEL == $target)
+        {
+            return $this->unsetAgent($cart_idx, Yii::$app->request);
+        }
+
+
+        if(self::TARGET_QTY   == $target)
+            return $this->updateQty($cart_idx);
+
+        if('addr' == $target)
+        {
+            if(Yii::$app->user->isGuest || $cart instanceof \common\components\cart\RecipeCart)
+                return $this->updateAddr4Guest($cart_idx);
+
+            return $this->updateAddr4Member($cart_idx);
+        }
+
+        if(self::TARGET_DATE  == $target)
+            return $this->updateDateTime($cart_idx);
+
+        if(self::TARGET_GIFT  == $target)
+            return $this->updateGift($cart_idx);
+
+        if(self::TARGET_PAYMENT == $target)
+            return $this->updatePayment($cart_idx);
+
+        if(self::TARGET_POINT == $target)
+            return $this->updatePointConsume($cart_idx);
+
+        if(self::TARGET_MSG   == $target)
+            return $this->updateMsg($cart_idx, Yii::$app->request->queryParams);
+
+    }
+
+    public function actionFinish($cart_idx=null)
+    {
+        if(null === $cart_idx)
+            $cart_idx = Yii::$app->request->post('cart_idx', null);
+        if(null === $cart_idx)
+            throw new \yii\web\BadRequestHttpException('invalid post params');
+
+        $this->module->finish($cart_idx);
+        return $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    /* @return void */
+    private function applyPaymentFilter()
+    {
+        $cart_idx = Yii::$app->request->get('cart_idx', 0);
+        $carts    = array_keys($this->module->cart->activeCarts);
+
+        if(! in_array($cart_idx, array_keys($carts)))
+            return; // invalid cart_idx
+        else
+            $cart_idx = (int) $cart_idx;
+
+        if(! $customer = $this->module->customer)
+            return; // guest user
+
+        if(CustomerGrade::PKEY_KA < $customer->grade_id)
+            return; // スペシャルより偉い
+
+        if(! isset($customer->ysdAccount) || !$customer->ysdAccount->isValid()) { 
+            return; // 口座振替なし
+
+        }
+
+        if(CustomerGrade::PKEY_AA == $customer->grade_id)
+            $msg = 'スタンダード会員の場合、ご登録いただいた口座振替はご利用できません。';
+
+
+    }
+
+    /**
+     * キャンペーン対象のライブ配信チケット購入済みかチェックし、カートにキャンペーンを自動セットする 2020/09/30 : kawai
+     */
+    private function checkLiveCampaign()
+    {
+        $cart_idx = Yii::$app->request->get('cart_idx', 0);
+        $carts    = array_keys($this->module->cart->activeCarts);
+
+        if(! in_array($cart_idx, array_keys($carts))) {
+            return; // invalid cart_idx
+        } else {
+            $cart_idx = (int) $cart_idx;
+        }
+
+        if(! $customer = $this->module->customer)
+            return; // guest user
+
+        // フロント（仮想店舗）に対してactiveかつ配信IDがセットされているキャンペーンを検索
+        $liveCampaign = Campaign::find()->where(['not', ['streaming_id' => null]])->active()->orderBy(['campaign_id' => SORT_DESC])->one();
+        if(!$liveCampaign)
+            return;
+
+        // 配信チケット購入情報をチェックする
+        $streaming_id = $liveCampaign->streaming_id;
+        if($streaming_id == 78 || $streaming_id == 79) {      
+            $tickets = StreamingBuy::find()->where(['customer_id' => $customer->customer_id])->andWhere(['in','streaming_id', ['78', '79']])->one();
+        } else {
+            $tickets = StreamingBuy::find()->where(['streaming_id' => $streaming_id, 'customer_id' => $customer->customer_id])->one();            
+        }
+        if(!$tickets)
+            return;
+
+        // キャンペーンをセットする
+        $cart = $this->module->cart->activeCarts[$carts[$cart_idx]];
+        if(!$cart->purchase->campaign) {
+            $params = ['PurchaseForm' => []];
+            $params['PurchaseForm']['campaign_code'] = $liveCampaign->campaign_code;
+            $this->module->updateCampaign($carts[$cart_idx], $params);
+        }
+    }
+
+    private function updateAddr4Guest($cart_idx)
+    {
+        $model = new \common\models\AddrbookForm();
+        if($scenario = Yii::$app->request->post('scenario'))
+            $model->scenario = $scenario;
+
+        $params = $this->module->cart->getCart($cart_idx)->delivery->attributes;
+        $model->load($params,'');
+
+        if($model->load(Yii::$app->request->bodyParams))
+        {
+            if($model::SCENARIO_ZIP2ADDR == $model->scenario)
+                $model->zip2addr();
+
+            elseif($this->module->updateAddr($cart_idx, $model))
+                return $this->redirect(['index','cart_idx'=>$cart_idx]);
+        }
+
+        return $this->render('update', [
+            'target'    => self::TARGET_ADDRESS,
+            'cart_idx'  => $cart_idx,
+            'model'     => $model,
+        ]);
+    }
+
+    private function updateAddr4Member($cart_idx)
+    {
+        if(($id = Yii::$app->request->get('id')) !== null)
+        {
+            if(0 == $id)
+                $model = Yii::$app->user->identity;
+            else
+                $model = \common\models\CustomerAddrbook::findOne([
+                    'customer_id' => Yii::$app->user->id,
+                    'id'          => $id,
+                ]);
+            if(! isset($model))
+                throw new \yii\base\UserException();
+
+            if($this->module->updateAddr($cart_idx, $model))
+                return $this->redirect(['index','cart_idx'=>$cart_idx]);
+        }
+        if(! isset($model))
+        {
+            $model = new \common\models\CustomerAddrbook();
+            $model->load($this->module->cart->getCart($cart_idx)->delivery->attributes,'');
+        }
+
+        return $this->render('update', [
+            'target'    => self::TARGET_ADDRBOOK,
+            'cart_idx'  => $cart_idx,
+            'model'     => $model,
+        ]);
+    }
+
+    private function updateDateTime($cart_idx)
+    {
+        if($this->module->cart->getCart($cart_idx)->company->company_id == \common\models\Company::PKEY_TY) {
+            $items = $this->module->cart->getCart($cart_idx)->items;
+            if(count($items) > 0 && $items[0]->getModel()->product_id == \common\models\Product::PKEY_OSECHI) {
+                $deliv_date = "2017-12-28 18:00:00";
+                $model = new \common\models\DeliveryDateTimeForm(['company_id'=>$cart_idx, 'osechi_date' => strtotime($deliv_date)]);
+                $model->osechi_date = strtotime($deliv_date);
+            } else {
+                $model = new \common\models\DeliveryDateTimeForm(['company_id'=>$cart_idx]);
+            }
+
+        } else {
+            $model = new \common\models\DeliveryDateTimeForm(['company_id'=>$cart_idx]);
+        }
+        $params = [
+            $model->formName() => $this->module->cart->getCart($cart_idx)->delivery->attributes
+        ];
+        $model->load($params);
+
+        $ret = false;
+
+        if(Yii::$app->request->isPost &&
+           $model->load(Yii::$app->request->bodyParams) &&
+           $model->validate())
+        {
+            $ret = $this->module->updateDateTime($cart_idx, $model->date, $model->time_id);
+        }
+        if($ret)
+            return $this->redirect(['index','cart_idx'=>$cart_idx]);
+
+        return $this->render('update', [
+            'target'   => self::TARGET_DATE,
+            'model'    => $model,
+            'cart'     => $this->module->cart->getCart($cart_idx),
+            'cart_idx' => $cart_idx,
+        ]);
+    }
+
+    private function updateGift($cart_idx)
+    {
+        if(Yii::$app->user->isGuest)
+            throw new \yii\base\UserException('Guest is not allowed request this page');
+
+        if(null !== ($gift = Yii::$app->request->post('gift')))
+        {
+            $this->module->updateGift($cart_idx, ['gift'=> $gift]);
+            return $this->redirect(['index','cart_idx'=>$cart_idx]);
+        }
+
+        return $this->render('update',[
+            'target'  => 'gift',
+            'cart_idx'=> $cart_idx,
+            'cart'    => $this->module->cart->getCart($cart_idx),
+        ]);
+    }
+
+    private function updateMsg($cart_idx)
+    {
+        $this->module->updateMsg($cart_idx, Yii::$app->request->bodyParams);
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    private function updatePayment($cart_idx)
+    {
+        if(Yii::$app->request->isPost)
+            if($this->module->updatePayment($cart_idx, Yii::$app->request->bodyParams))
+                return $this->redirect(['index','cart_idx'=>$cart_idx]);
+
+        $cart     = $this->module->cart->getCart($cart_idx);
+        $payments = $cart->payments;
+
+        return $this->render('update', [
+            'target'   => self::TARGET_PAYMENT,
+            'model'    => $payments,
+            'cart'     => $cart,
+            'cart_idx' => $cart_idx,
+        ]);
+    }
+
+    private function updatePointConsume($cart_idx)
+    {
+        $this->module->updatePointConsume($cart_idx, Yii::$app->request->bodyParams);
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    private function updateQty($cart_idx)
+    {
+        $request = Yii::$app->request;
+
+        $this->module->updateQty($cart_idx, $request->isPost? $request->bodyParams : $request->queryParams);
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    private function updateCampaign($cart_idx, $request)
+    {
+
+        $this->module->updateCampaign($cart_idx, $request->isPost? $request->bodyParams : $request->queryParams);
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    private function unsetCampaign($cart_idx)
+    {
+        $request = Yii::$app->request;
+
+//        $this->module->deleteCampaign($cart_idx, $request->isPost? $request->bodyParams : $request->queryParams);
+        $this->module->unsetCampaign($cart_idx);
+
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+    
+    
+    private function updateAgent($cart_idx, $request)
+    {
+
+        $this->module->updateAgent($cart_idx, $request->isPost? $request->bodyParams : $request->queryParams);
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+    private function unsetAgent($cart_idx, $request)
+    {
+//        $request = Yii::$app->request;
+
+        $this->module->unsetAgent($cart_idx,$request->isPost? $request->bodyParams : $request->queryParams);
+
+        $this->redirect(['index','cart_idx'=>$cart_idx]);
+    }
+
+
+    /**
+     * 別画面から商品情報一覧のリクエストが来た際に指定フォーマットで返す
+     * 未ログインならログインさせる
+     * @param type string $campaign_code, customer_id
+     */
+    public function actionGetLiveProductAll($campaign_code=null) {
+        // キャンペーンコードをセットする
+        if($campaign_code) {
+            // var_dump($campaign_code);
+            $campaignQuery = \common\models\Campaign::find()->where(['campaign_code' => $campaign_code]);
+            // var_dump($campaignQuery->count());
+            if($campaignQuery->count() != 0) {
+                $carts = $this->module->cart->activeCarts;
+                if(count($carts) == 0) {
+                    $this->module->cart->updateCampaign(0, $campaign_code); // 一括発送カート
+                    $this->module->cart->updateCampaign(1, $campaign_code); // 豊受カート
+                } else {
+                    foreach ($carts as $idx => $cart) {
+                        $this->module->cart->updateCampaign($idx, $campaign_code);
+                    }
+                }
+
+                // $this->module->saveModel();
+            }
+        }
+        // 商品情報一覧の取得
+        // mall.toyouke.com/index.php/livemng/live_product_input.txtからproduct_id一覧を取得
+        $contents = file("/var/www/mall/frontend/web/livemng/live_product_input.txt");
+        $products = "";
+        foreach ($contents as $product_id) {
+            $product = \common\models\Product::findOne((int)$product_id);
+            if($product) {
+                $image = $product->images ?  $product->images[0]->basename : "";
+                $product = $image.",".$product->name.",".(int)$product_id.",".$product->price.",".($product->price + $product->tax).",".$product->tax."#";
+
+                $products .= $product;
+            }
+        }
+        return substr($products,0, -1);
+    }
+
+
+    /**
+     * 別画面から直接カートに商品・レメディーを追加できるようにする
+     * @param type string $rid, $pid, $vid, $qty=1
+     * @return
+     **/
+    public function actionPutLiveProductAll($customer_id=null, $campaign_code=null) {
+        // var_dump(Yii::$app->request->get());
+        $error = [];
+        if($campaign_code) {
+            $campaignQuery = \common\models\Campaign::find()->where(['campaign_code' => $campaign_code]);
+            // var_dump($campaignQuery->count());
+            if($campaignQuery->count() != 0) {
+                $carts = $this->module->cart->activeCarts;
+                if(count($carts) == 0) {
+                    $this->module->cart->updateCampaign(0, $campaign_code); // 一括発送カート
+                    $this->module->cart->updateCampaign(1, $campaign_code); // 豊受カート
+                } else {
+                    foreach ($carts as $idx => $cart) {
+                        $this->module->cart->updateCampaign($idx, $campaign_code);
+                    }
+                }
+            }
+        }
+
+
+
+        $cart_product = Yii::$app->request->get('cart_product', null);
+        $cart_count = Yii::$app->request->get('cart_count', null);
+        foreach($cart_product as $key => $value) {
+            // var_dump($key, $value);
+            $results = $this->actionPutProduct($value, $cart_count[$key]);
+            if($results['result'] == 1)
+                Yii::$app->session->removeFlash('success');
+
+            if($results['error']) {
+                $error[] = $results['error'];
+            }
+        }
+
+        return $this->redirect(['index']);
+    }
+
+    /**
+     * 別画面から直接カートに商品・レメディーを追加できるようにする
+     * @param type string $rid, $pid, $vid, $qty=1
+     * @return
+     **/
+    public function actionPutProduct($pid, $qty=1) {
+        $results = ['result' => 0, 'error' => ""];
+
+        $qty = (int) trim(mb_convert_kana($qty, 'ns'));
+        if($qty <= 0)                              
+            throw new \yii\base\UserException("追加数量($qty)が不正です");
+                        
+        $param = [  
+            'qty'       => $qty,
+            'sku_color' => Yii::$app->request->get('sku_color', null),
+            'sku_size'  => Yii::$app->request->get('sku_size',  null),
+            'children' => Yii::$app->request->get('children', null),
+        ];
+        if(\common\models\Product::findOne([$pid])) {
+            $results['result'] = $this->module->addProduct($pid, $param);
+        } else {
+            Yii::$app->session->addFlash('warning', '指定商品ID:'.$pid.'は取り扱っていないか、存在しない商品です');
+            $results['result'] = 0;
+            $results['error'] = '指定商品ID:'.$pid.'は取り扱っていないか、存在しない商品です';
+        }
+        if(Yii::$app->request->isAjax &&
+           Yii::$app->session->removeFlash('success'))         
+               return $qty; // ok                              
+
+        return $results;
+    }
+
+}
