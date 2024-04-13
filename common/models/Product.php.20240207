@@ -1,0 +1,764 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+use \yii\helpers\ArrayHelper;
+
+/**
+ * This is the model class for table "{{%dtb_product}}".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/Product.php $
+ * $Id: Product.php 2838 2016-08-12 07:17:17Z mori $
+ *
+ * @property integer $product_id
+ * @property integer $category_id
+ * @property string  $code
+ * @property string  $sku_id
+ * @property string  $name
+ * @property integer $price
+ * @property string  $cool_id
+ * @property integer  $pre_order
+ * @property string  $start_date
+ * @property string  $expire_date
+ *
+ * @property customerFavorite[] $customerFavorites
+ * @property inventoryItem[] $inventoryItems
+ * @property manufactureItem[] $manufactureItems
+ * @property mMaterialInventoryItem[] $materialInventoryItems
+ * @property category $category
+ * @property productDiscount[] $productDiscounts
+ * @property productJan[] $productJans
+ * @property productPoint[] $productPoints
+ * @property purchaseItem[] $purchaseItems
+ * @property storageItem[] $ptorageItems
+ * @property productMaterial[] $productMaterials
+ */
+
+class Product extends \yii\db\ActiveRecord
+{
+    const DATETIME_MAX = '3000-12-31 00:00:00';
+    const EAN13_PREFIX = 24;
+
+    const PKEY_TORANOKO_G_ADMISSION = 265; //とらのこ正会員 年会費
+    const PKEY_TORANOKO_N_ADMISSION = 266; //とらのこネットワーク会員 年会費
+    const PKEY_TORANOKO_N_UPGRADE   = 643; //とらのこネットワーク会員 正会員へアップグレード
+    const PKEY_MACHINE_REMEDY_30C   = 444; // 特別レメディー (30Cまで、単品)
+    const PKEY_MACHINE_REMEDY_200C  = 445; // 特別レメディー (200Cまで、単品)
+    const PKEY_MACHINE_REMEDY_1M    = 446; // 特別レメディー (1M以上、単品)
+    const PKEY_MACHINE_REMEDY_COMB  = 447; // 特別レメディー (コンビ)
+    const PKEY_OSECHI               = 1079; // 豊受自然農の無添加おせち
+
+    const COOL_CHILLED = 1; // クール便（冷蔵）
+    const COOL_FROZEN = 2; // 冷凍便
+
+    private $_imgs = null;
+
+
+    public $vender_key = ""; 
+    public $bunrui_code1 = "";
+    public $bunrui_code2 = "";
+    public $bunrui_code3 = ""; 
+    public $keywords = "";
+
+    public function init()
+    {
+        parent::init();
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'dtb_product';
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function behaviors()
+    {
+        return [
+            'date'=>[
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['update_date'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => ['update_date'],
+                ],
+                'value' => function ($event) {
+                    return date('Y-m-d H:i:s');
+                },
+            ],
+            'sync'=>[
+                'class' => ProductMasterSyncronizer::className(),
+                'owner' => $this,
+            ],
+            'img' =>[
+                'class' => ProductImageSyncronizer::className(),
+                'owner' => $this,
+            ],
+            'log' => [
+                'class'  => ChangeLogger::className(),
+                'owner'  => $this,
+                'user'   => Yii::$app->has('user') ? Yii::$app->user : null,
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['category_id', 'name', 'kana', 'price', 'start_date', 'expire_date'], 'required'],
+            [['category_id', 'price', 'restrict_id','in_stock', 'recommend_flg', 'recommend_seq', 'liquor_flg', 'upper_limit', 'tax_id', 'cool_id', 'pre_order'], 'integer'],
+            [['name','kana','summary','description'], 'string'],
+            ['kana','filter','filter'=>function($value){ return mb_convert_kana($value,'c'); }],
+            ['kana','filter', 'filter'=> function($value) { return \common\components\Romaji2Kana::translate($value,'hiragana'); }],
+            ['code','filter','filter'=>function($value){ return strtoupper($value); }],
+            ['in_stock','in','range'=>[0,1]],
+            [['start_date', 'expire_date'], 'safe'],
+            ['start_date','default', 'value'=> date('Y-m-d 00:00:00') ],
+            ['start_date','compare', 'compareAttribute'=>"expire_date",'operator'=>'<'],
+            ['expire_date','default','value'=> self::DATETIME_MAX ],
+            [['code', 'name', 'kana'], 'string', 'max' => 45],
+            [['sku_id'], 'string', 'max' => 13],
+            [['code'], 'unique'],
+            [['sku_id'], 'unique'],
+            ['upper_limit', 'default', 'value' => 10],
+            [['vender_key', 'bunrui_code1', 'bunrui_code2', 'bunrui_code3', 'sku_id', 'keywords', 'cool_id', 'pre_order'], 'safe'],
+        ];
+    }
+
+    public function applyDefaultValues()
+    {
+        $this->code = sprintf('%02d%010d',
+                              self::EAN13_PREFIX,
+                              Product::find()->select('product_id')->max('product_id') + 1 );
+        $this->code .= \common\components\ean13\CheckDigit::generate($this->code);
+
+        $this->sku_id = $this->code;
+
+        $this->start_date  = date('Y-m-d 00:00:00');
+        $this->expire_date = self::DATETIME_MAX;
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'category'     => "カテゴリ",
+            'name'         => "品名",
+            'kana'         => "かな",
+            'summary'      => "紹介文",
+            'description'  => "詳しい説明",
+            'product_id'   => "商品ID",
+            'category_id'  => "カテゴリ",
+            'subcategories'=> "サブカテゴリー",
+            'code'         => "品番",
+            'sku_id'         => "SKU-ID",
+            'price'        => "価格",
+            'tax_id'       => "消費税区分",
+            'cool_id'       => "クール区分",
+            'pre_order'    => "予約商品区分",
+            'start_date'   => "発売日",
+            'expire_date'  => "終了日",
+            'restrict_id'  => "公開区分",
+            'in_stock'     => "在庫",
+            'recommend_flg'=> 'おすすめ商品に表示',
+            'recommend_seq'=> 'おすすめ商品表示順',
+            'liquor_flg'   => 'アルコール商品',
+            'upper_limit'  => '購入個数上限',
+            'keywords'  => '検索キーワード',
+            'vender_key'  => '製造元',
+            'sku_id'      => 'SKU-ID',
+            'bunrui_code1'  => '大分類',
+            'bunrui_code2'  => '中分類',
+            'bunrui_code3'  => '小分類',
+        ];
+    }
+
+    public function attributeHints()
+    {
+        return [
+            'recommend_flg' => 'トップ画面の「おすすめ」に表示されるようになります。'
+        ];
+    }
+
+    public function beforeValidate() {
+        $vender_key = (int)$this->vender_key;
+        $bunrui_code1 = (int)$this->bunrui_code1;
+        $bunrui_code2 = (int)$this->bunrui_code2;
+        $bunrui_code3 = (int)$this->bunrui_code3;
+        if($vender_key && $bunrui_code1 && $bunrui_code2 && $bunrui_code3) {
+
+            if($this->isNewRecord) {
+                $sales = new SalesCategory([
+                    'sku_id' => $this->getSkuId(),
+                    'vender_key' => strtoupper(Company::find()->where(['company_id' => $vender_key + 1])->one()->key),
+                    'bunrui_code1' => SalesCategory1::find()->where(['bunrui_id' => $bunrui_code1 + 1])->one()->bunrui_code1,
+                    'bunrui_code2' => SalesCategory2::find()->where(['bunrui_id' => $bunrui_code2 + 1])->one()->bunrui_code2,
+                    'bunrui_code3' => SalesCategory3::find()->where(['bunrui_id' => $bunrui_code3 + 1])->one()->bunrui_code3,
+                ]);
+            } else {
+                $sales = SalesCategory::find()->where(['sku_id' => $this->sku_id])->one();
+                if(!$sales) {
+                    $sales = new SalesCategory([
+                        'sku_id' => $this->getSkuId(),
+                    ]);
+                }
+                $sales->vender_key =  strtoupper(Company::find()->where(['company_id' => $vender_key + 1])->one()->key);
+                $sales->bunrui_code1 = SalesCategory1::find()->where(['bunrui_id' => $bunrui_code1 + 1])->one()->bunrui_code1;
+                $sales->bunrui_code2 = SalesCategory2::find()->where(['bunrui_id' => $bunrui_code2 + 1])->one()->bunrui_code2;
+                $sales->bunrui_code3 = SalesCategory3::find()->where(['bunrui_id' => $bunrui_code3 + 1])->one()->bunrui_code3;
+
+            }
+            if($sales->validate()){
+            } else {
+                return false;
+            }
+        }
+        return parent::beforeValidate();
+    }
+
+    public function afterSave($insert, $changedAttributes)
+    {
+        parent::afterSave($insert, $changedAttributes);
+
+        $vender_key = $this->vender_key;
+        $bunrui_code1 = $this->bunrui_code1;
+        $bunrui_code2 = $this->bunrui_code2;
+        $bunrui_code3 = $this->bunrui_code3;
+
+        $transaction_flg = false;
+        $master = $this->hasOne(ProductMaster::className(), ['product_id' => 'product_id'])->one();
+
+
+        if($this->keywords != $master->keywords) {
+            $transaction = Yii::$app->db->beginTransaction();
+            $transaction_flg = true;
+            try {
+                $master->keywords = $this->keywords;
+                if($master->validate() && $master->save()){
+                } else {
+                    Yii::warning($sales->errors);
+                    $transaction->rollBack();
+                    return false;
+                }
+
+            }
+            catch (Exception $e)
+            {
+                Yii::warning($e->__toString(), $this->className().'::'.__FUNCTION__);
+                $transaction->rollBack();
+                return false;
+            }
+
+        }
+
+        if($vender_key && $bunrui_code1 && $bunrui_code2 && $bunrui_code3) {
+
+            if(!$transaction_flg) {
+                $transaction = Yii::$app->db->beginTransaction();
+                $transaction_flg = true;
+            }
+
+            try {
+                if($this->isNewRecord) {
+                    $sales = new SalesCategory([
+                        'sku_id' => $this->getSkuId(),
+                        'vender_key' => strtoupper(Company::find()->where(['company_id' => (int)$vender_key + 1])->one()->key),
+                        'bunrui_code1' => SalesCategory1::find()->where(['bunrui_id' => (int)$bunrui_code1 + 1])->one()->bunrui_code1,
+                        'bunrui_code2' => SalesCategory2::find()->where(['bunrui_id' => (int)$bunrui_code2 + 1])->one()->bunrui_code2,
+                        'bunrui_code3' => SalesCategory3::find()->where(['bunrui_id' => (int)$bunrui_code3 + 1])->one()->bunrui_code3,
+                    ]);
+                } else {
+                    $sales = SalesCategory::find()->where(['sku_id' => $this->getSkuId()])->one();
+                    if(!$sales) {
+                        $sales = new SalesCategory([
+                            'sku_id' => $this->getSkuId(),
+                        ]);
+
+                    }
+                    $sales->vender_key =  strtoupper(Company::find()->where(['company_id' => (int)$vender_key + 1])->one()->key);
+                    $sales->bunrui_code1 = SalesCategory1::find()->where(['bunrui_id' => (int)$bunrui_code1 + 1])->one()->bunrui_code1;
+                    $sales->bunrui_code2 = SalesCategory2::find()->where(['bunrui_id' => (int)$bunrui_code2 + 1])->one()->bunrui_code2;
+                    $sales->bunrui_code3 = SalesCategory3::find()->where(['bunrui_id' => (int)$bunrui_code3 + 1])->one()->bunrui_code3;
+
+                }
+                if($sales->validate() && $sales->save()){
+                } else {
+                    Yii::warning($sales->errors);
+                    $transaction->rollBack();
+                    return false;
+                }
+
+            }
+            catch (Exception $e)
+            {
+                Yii::warning($e->__toString(), $this->className().'::'.__FUNCTION__);
+                $transaction->rollBack();
+                return false;
+            }
+
+        }
+
+        if($transaction_flg)
+            $transaction->commit();
+
+        return true;
+    }
+
+
+    /**------------------ GETTER METHODS ------------------**/
+
+    /* @return string */
+    public function getBarcode($seek=true)
+    {
+        if(($jan = ArrayHelper::getValue($this,'productJan.jan')) && $seek)
+            return $jan;
+
+        if(($isbn = ArrayHelper::getValue($this,'bookinfo.isbn')) && $seek)
+            return $isbn;
+
+        if(is_numeric($this->code) && (13 == strlen($this->code))) // ean13 is set as product code
+            return $this->code;
+
+        $code  = sprintf('%02d%010d', self::EAN13_PREFIX, $this->product_id);
+        $code .= \common\components\ean13\CheckDigit::generate($code);
+
+        return $code;
+    }
+
+    public function getSkuId()
+    {
+        return $this->sku_id;
+    }
+
+    public function setSkuId($val)
+    {
+        $this->sku_id = $val;
+    }
+
+    public function getBookinfo()
+    {
+        return $this->hasOne(Book::className(), ['product_id' => 'product_id' ]);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCategory()
+    {
+        return $this->hasOne(Category::className(), ['category_id' => 'category_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCompany()
+    {
+        return $this->hasOne(Company::className(), ['company_id' => 'seller_id'])->viaTable('mtb_category', ['category_id' => 'category_id']);
+    }
+
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCustomers()
+    {
+        $pid = $this->product_id;
+        $q1 = \common\models\Purchase::find();
+        $q2 = \common\models\Pointing::find();
+
+        foreach([$q1, $q2] as $q)
+            $q = $q->select('customer_id')
+                   ->distinct()
+                   ->joinWith([
+                       'items'=> function($query) use($pid) { $query->andWhere(['product_id' => $pid]); }
+                   ]);
+
+        return \common\models\Customer::find()
+               ->orWhere(['customer_id' => $q1])
+               ->orWhere(['customer_id' => $q2]);
+    }
+
+    public function getDescriptions()
+    {
+        return $this->hasMany(ProductDescription::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getDtbCustomerFavorites()
+    {
+        return $this->hasMany(DtbCustomerFavorite::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getDtbInventoryItems()
+    {
+        return $this->hasMany(DtbInventoryItem::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getDtbManufactureItems()
+    {
+        return $this->hasMany(ManufactureItem::className(), ['product_id' => 'product_id']);
+    }
+
+    /* @return string (might contain Html tags), stllen() up to 50  */
+    public function getExcerpt($maxlen = 50)
+    {
+        $text = $this->summary;
+        if(! $text)
+            $this->description;
+
+        if(! $text)
+            return '';
+
+        $text = trim(mb_convert_kana($text, "s")); // remove spaces
+        $text = preg_replace('/<BR>/i', '', $text);
+
+        if($maxlen < mb_strlen($text))
+            $text = mb_substr($text, 0, $maxlen) . '...';
+
+        return $text;
+    }
+
+    public function getImages()
+    {
+        return $this->hasMany(ProductImage::className(), ['ean13'=> 'barcode'])
+                    ->orderBy(['weight'=>SORT_DESC])
+                    ->all();
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getInventories()
+    {
+        return $this->hasMany(Inventory::className(), ['inventory_id' => 'inventory_id'])->viaTable('dtb_inventory_item', ['product_id' => 'product_id']);
+    }
+
+    /* @return ActiveQuery */
+    public function getOffer()
+    {
+        return $this->hasMany(Offer::className(),['category_id'=>'category_id']);
+    }
+
+    public function getOfferFor(\common\models\Customer $customer = null, $time = null)
+    {
+        $query = $this->getOffer();
+
+        if(! $customer)
+            return 0;
+
+        if(! $customer->getAttribute('grade_id'))
+            return 0;
+
+        if($customer->isAgencyOf($this->seller->company_id))
+            return 0;
+
+        return $customer->grade->defaultPointRate;
+    }
+
+    /* @return ActiveQuery */
+    public function getSeasonalOffer($time=null)
+    {
+        $ean13   = [];
+        $ean13[] = $this->getBarcode(false);
+
+        if($jan = ArrayHelper::getValue($this,'productJan.jan'))
+            $ean13[] = $jan;
+
+        if($isbn = ArrayHelper::getValue($this,'bookinfo.isbn'))
+            $ean13[] = $jan;
+
+        return OfferSeasonal::find()->where(['ean13'=>$ean13]);
+    }
+
+    public function getNext()
+    {
+        return self::findOne($this->product_id + 1 );
+    }
+
+    public function getPickcode()
+    {
+        if(null !== ($model = $this->hasOne(ProductPickcode::ClassName(), ['product_code'=>'code'])->one()))
+            return $model->pickcode;
+
+        return null;
+    }
+
+    public function getPrev()
+    {
+        return self::findOne($this->product_id - 1 );
+    }
+
+    public function getStocks()
+    {
+        return $this->hasMany(Stock::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPointingItems()
+    {
+        $query = $this->hasMany(PointingItem::className(), ['product_id' => 'product_id']);
+
+        $query->joinWith(['pointing' => function ($query) {
+            $query->active();
+        }]);
+
+        return $query;
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getProductJan()
+    {
+        return $this->hasOne(ProductJan::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPurchaseItems()
+    {
+        return $this->hasMany(PurchaseItem::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getRestriction()
+    {
+        return $this->hasOne(ProductRestriction::className(), ['restrict_id' => 'restrict_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getSeller()
+    {
+        return $this->hasOne(Company::className(), ['company_id' => 'seller_id'])->viaTable('mtb_category', ['category_id'=>'category_id']);
+    }
+
+    public function getSubcategories()
+    {
+
+        $query = Subcategory::find()
+                        ->leftJoin(['ps' => \common\models\ProductSubcategory::tableName()], Subcategory::tableName().'.subcategory_id=ps.subcategory_id')
+                        ->leftJoin(['m' => \common\models\ProductMaster::tableName()], 'ps.ean13=m.ean13')
+			->leftJoin(['p' => Product::tableName()], 'm.product_id=p.product_id')
+			->where(['p.product_id' => $this->product_id]);
+	return $query;
+        //return $this->hasMany(Subcategory::className(),['subcategory_id'=>'subcategory_id'])
+          //          ->viaTable(ProductSubcategory::tableName(),['ean13'=>'code']);
+    }
+
+    /* @return int */
+    public function getTax()
+    {
+        return \common\models\Tax::findOne($this->tax_id)->compute($this->price);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getTransferItems()
+    {
+        return $this->hasMany(TransferItem::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getTransfers()
+    {
+        return $this->hasMany(Transfer::className(), ['transfer_id' => 'transfer_id'])->viaTable('dtb_transfer_item', ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getMtbProductMaterials()
+    {
+        return $this->hasMany(ProductMaterial::className(), ['product_id' => 'product_id']);
+    }
+
+    public function getUrl()
+    {
+        return \yii\helpers\Url::to(['/product/view','id'=>$this->product_id]);
+    }
+
+    public function getProductMaster()
+    {
+        return $this->hasOne(ProductMaster::className(), ['product_id' => 'product_id']);
+    }
+
+    /**------------------ end of GETTER METHODS ------------------**/
+
+    public static function find()
+    {
+        return new ProductQuery(get_called_class());
+    }
+
+    public static function findByBarcode($ean13)
+    {
+        $prefix = self::EAN13_PREFIX;
+        if($prefix == substr($ean13, 0, strlen($prefix)))
+        {
+            $id = (int) substr($ean13, strlen($prefix), -1); // strip prefix and checkdigit
+            return Product::findOne($id);
+        }
+
+        return static::find()
+            ->joinWith('productJan')
+            ->andFilterWhere(['or',
+                              ['dtb_product_jan.jan' => $ean13],
+                              ['code'                => $ean13],
+            ])
+            ->one();
+    }
+
+    public function isBook()
+    {
+        return (Category::BOOK == $this->category_id);
+    }
+
+    public function isExpired()
+    {
+        return (strtotime($this->expire_date) <= time());
+    }
+
+    /**
+     * 商品が酒類であるかどうか
+     */
+    public function isLiquor()
+    {
+        return $this->liquor_flg;
+    }
+
+    /**
+     * 商品がレメディーに分類されるかどうか
+     */
+    public function isRemedy()
+    {
+        return (Category::REMEDY == $this->category_id);
+    }
+
+    /**
+     * 商品がHJ「雑貨」カテゴリに属するか
+     * @return boolean
+     */
+    public function isRemedyVariety()
+    {
+        return (Category::REMEDY_GOODS == $this->category_id);
+/*
+        // モデルが無い場合、又は、サブカテゴリーが取得できない場合
+    	if(! $this || ! $subcategories = yii\helpers\ArrayHelper::getColumn($this->getSubcategories()->all(), 'subcategory_id'))
+    	{
+    		Yii::error([
+    				sprintf('could not get model from (%s)', $this->name),
+    				$this->attributes,
+    		], self::className().'::'.__FUNCTION__);
+    		return false;
+    	}
+
+    	// 商品のサブカテゴリと雑貨系サブカテゴリの配列を比較
+        foreach($subcategories as $subcategory_id) {
+            if(in_array($subcategory_id,Subcategory::getPkeyRemedyVarieties())) {
+                return
+            }
+        }
+        return = in_array(,Subcategory::getPkeyRemedyVarieties())
+    	$diff = array_diff(Subcategory::getPkeyRemedyVarieties(), $subcategories);
+    	// 商品の属するサブカテゴリーのうちいずれかが対象に含まれていればTRUEを返す
+    	if(count($diff) <= count($subcategories)) {
+    		return true;
+    	} else {
+    		return false;
+    	}
+ */
+
+    }
+
+    public function isRestrictedTo($customer = null)
+    {
+        if(! $customer)
+            return (0 < $this->restrict_id);
+
+        if(($this->restrict_id < ProductRestriction::PKEY_INSTORE_ONLY) &&
+            $customer->isAgencyOf($this->seller->company_id))
+                return false;
+
+        return ($customer->getAttribute('grade_id') < $this->restrict_id);
+    }
+
+    public function in_stock()
+    {
+        return true;
+    }
+
+    public function isActive()
+    {
+        if (time() > strtotime($this->expire_date)) {
+            return false;
+        }
+        return true;
+    }
+}
+
+class ProductQuery extends \yii\db\ActiveQuery
+{
+    public function active($state = true)
+    {
+        if($state)
+            return $this->andWhere('NOW() <= dtb_product.expire_date');
+        else
+            return $this->andWhere('dtb_product.expire_date < NOW()');
+    }
+
+    public function oasis()
+    {
+        return $this->andWhere(['like','dtb_product.name','Oasis']);
+    }
+
+    public function company($pk)
+    {
+        return $this->andWhere(['category_id'=>
+            Category::find()->where(['seller_id'=>$pk])->select('category_id')
+        ]);
+    }
+
+    // 相談種別一覧を取得
+    public function sodanProduct() {
+        $this->leftJoin(['m' => \common\models\ProductMaster::tableName()], 'dtb_product.product_id = m.product_id')
+             ->leftJoin(['ps' => \common\models\ProductSubcategory::tableName()], 'ps.ean13 = m.ean13')
+             ->andWhere(['dtb_product.category_id' => Category::SODAN])
+			 ->andWhere('ps.subcategory_id <> ' . Subcategory::PKEY_SODAN_COUPON);
+        return $this;
+    }
+
+    // 相談クーポン一覧を取得
+    public function sodanCoupon() {
+        $this->leftJoin(['m' => \common\models\ProductMaster::tableName()], 'dtb_product.product_id = m.product_id')
+             ->leftJoin(['ps' => \common\models\ProductSubcategory::tableName()], 'ps.ean13 = m.ean13')
+             ->andWhere(['dtb_product.category_id' => Category::SODAN])
+			 ->andWhere('ps.subcategory_id = ' . Subcategory::PKEY_SODAN_COUPON);
+        return $this;
+    }
+}

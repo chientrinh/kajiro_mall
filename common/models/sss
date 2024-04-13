@@ -1,0 +1,11 @@
+cp /var/www/mall/common/models/ComOffPurchase.php.20210709 /var/www/mall/common/models/ComOffPurchase.php
+cp /var/www/mall/common/models/ComOffPurchaseItem.php.20210709 /var/www/mall/common/models/ComOffPurchaseItem.php
+cp /var/www/mall/common/models/Purchase.php.20210709 /var/www/mall/common/models/Purchase.php
+cp /var/www/mall/common/models/PurchaseForm.php.20210709 /var/www/mall/common/models/PurchaseForm.php
+cp /var/www/mall/common/models/PurchaseItem.php.20210709 /var/www/mall/common/models/PurchaseItem.php
+cp /var/www/mall/common/models/SearchProductFavor.php.20210709 /var/www/mall/common/models/SearchProductFavor.php
+cp /var/www/mall/console/migrations/m210602_000001_init_dtb_com_off_purchase_com_off_purchase_item.php.20210709 /var/www/mall/console/migrations/m210602_000001_init_dtb_com_off_purchase_com_off_purchase_item.php
+cp /var/www/mall/frontend/models/SearchProductMaster.php.20210709 /var/www/mall/frontend/models/SearchProductMaster.php
+cp /var/www/mall/frontend/views/hj/wholesale.php.20210709 /var/www/mall/frontend/views/hj/wholesale.php
+
+

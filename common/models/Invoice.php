@@ -1,0 +1,504 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "rtb_invoice".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/Invoice.php $
+ * $Id: Invoice.php 4190 2019-10-03 08:41:56Z mori $
+ *
+ * @property integer $invoice_id
+ * @property integer $company_id
+ * @property integer $customer_id
+ * @property string  $target_date
+ * @property string  $create_date
+ * @property string  $update_date
+ * @property integer $created_by
+ * @property integer $updated_by
+ * @property integer $due_purchase
+ * @property integer $purchase_including_tax10
+ * @property integer $purchase_including_tax8
+ * @property integer $due_commission
+ * @property integer $due_pointing
+ * @property integer $due_total
+ * @property string  $due_date
+ * @property integer $payment_id
+ * @property integer $status
+ *
+ * @property Company  $company
+ * @property Customer $customer
+ */
+class Invoice extends \yii\db\ActiveRecord
+{
+    public $is_agency;
+    public $due_tax;
+    public $due_normal_subtotal;
+    public $due_normal_tax;
+    public $due_reduced_subtotal;
+    public $due_reduced_tax;
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'rtb_invoice';
+    }
+
+    /* @inheritdoc */
+    public function behaviors()
+    {
+        return [
+            'update' => [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['create_date','update_date'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => 'update_date',
+                ],
+                'value' => function ($event) {
+                    return date('Y-m-d H:i:s');
+                },
+            ],
+            'log' => [
+                'class'  => ChangeLogger::className(),
+                'owner'  => $this,
+                'user'   => Yii::$app->has('user') ? Yii::$app->user : null,
+            ],
+            'staff_id' => [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['created_by','updated_by'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => ['updated_by'],
+                ],
+                'value' => function ($event) {
+                    if(! Yii::$app->get('user') || ! Yii::$app->user->identity instanceof \backend\models\Staff)
+                        throw new \yii\web\ForbiddenHttpException("you are not permitted to update this table");
+
+                    return Yii::$app->user->id;
+                },
+            ],
+        ];
+
+        return $params;
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['customer_id', 'target_date', 'due_purchase', 'purchase_including_tax10', 'purchase_including_tax8', 'due_commission', 'due_pointing', 'due_total'], 'required'],
+            [['company_id', 'customer_id', 'created_by', 'updated_by', 'due_purchase', 'purchase_including_tax10', 'purchase_including_tax8', 'due_commission', 'due_pointing', 'due_total'], 'integer'],
+            [['company_id'],'exist','targetClass'=>Company::className()],
+            [['customer_id'],'exist','targetClass'=>Customer::className()],
+            [['payment_id'],'exist','targetClass'=>Payment::className()],
+            [['created_by','updated_by'],'exist','targetClass'=>\backend\models\Staff::className(), 'targetAttribute'=>'staff_id'],
+            ['target_date', 'filter', 'filter' => function($value){if(preg_match('/^[0-9]+-[0-9]+$/',$value)) return date('Y-m-t',strtotime($value.'-01')); else return $value; }],
+            [['create_date', 'update_date', 'is_agency', 'due_tax', 'due_normal_subtotal', 'due_normal_tax', 'due_reduced_subtotal', 'due_reduced_tax'], 'safe'],
+            //['due_total','unique','targetAttribute'=>['customer_id','target_date','due_total','due_purchase','due_pointing','due_commission']],
+            ['status','default','value'=> InvoiceStatus::PKEY_ACTIVE],
+            ['status','exist','targetClass'=>InvoiceStatus::className(),'targetAttribute'=>'istatus_id'],
+            ['payment_id','exist','targetClass'=>Payment::className()],
+            ['due_purchase',  'compare','operator'=>'==','compareValue'=> $this->computePurchase(),'message'=>'最新の計算結果と一致しません'],
+            ['due_pointing',  'compare','operator'=>'==','compareValue'=> $this->computePointing(),'message'=>'最新の計算結果と一致しません'],
+            ['due_commission','compare','operator'=>'==','compareValue'=> $this->computeCommission(),'message'=>'最新の計算結果と一致しません'],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'invoice_id'     => '請求書番号',
+            'company_id'     => '販社',
+            'customer_id'    => 'Customer ID',
+            'target_date'    => '対象年月',
+            'create_date'    => '発行日',
+            'update_date'    => '更新日',
+            'created_by'     => '発行者',
+            'updated_by'     => '更新者',
+            'due_purchase'   => '今回お買上額',
+            'purchase_including_tax10'   => '税10％対象',
+            'purchase_including_tax8'   => '税8%対象',            
+            'due_commission' => '代理店手数料',
+            'due_pointing'   => 'ポイント付与代金',
+            'due_total'      => 'ご請求額',
+            'payment_id'     => 'お支払方法',
+            'status'         => '状態',
+            'is_agency'      => '代理店',
+            'due_tax'        => '消費税',
+            'due_normal_subtotal'        => '10%対象',
+            'due_normal_tax'        => '内消費税',
+            'due_reduced_subtotal'      => '8%対象',
+            'due_reduced_tax'      => '内消費税',
+        ];
+    }
+
+    public function beforeSave($insert)
+    {
+        $this->due_date = date('Y-m-d', $this->getDueDate());
+
+        if($insert)
+        {
+            $this->db->createCommand(
+                'UPDATE rtb_invoice SET status = :void WHERE customer_id = :cid AND target_date = :date'
+            )->bindValues([
+                ':void' => InvoiceStatus::PKEY_VOID,
+                ':cid'  => $this->customer_id,
+                ':date' => $this->target_date,
+            ])->execute(); // void previous invoice(s)
+        }
+
+        return parent::beforeSave($insert);
+    }
+
+    public function checkCompute()
+    {
+        return ($this->computePurchase() != 0);
+
+    }
+
+
+    public function compute()
+    {
+//        if(! $this->isNewRecord)
+//            throw new \yii\base\Exception('you cannot compute item once inserted');
+        if(! $this->validate(['customer_id','target_date']))
+            throw new \yii\base\InvalidConfigException('customer_id or target_date is not properly set');
+
+        $this->due_purchase   = $this->computePurchase();
+        $this->due_commission = $this->computeCommission();
+        $this->due_pointing   = $this->computePointing();
+
+        $tax = $this->computeTax();
+        $this->due_tax = $tax['tax_total'];
+ 
+        // 標準税率
+        $this->due_normal_subtotal = $tax['normal_subtotal'];
+        $this->due_normal_tax = $tax['normal'];
+        // 軽減税率
+        $this->due_reduced_subtotal = $tax['reduced_subtotal'];
+        $this->due_reduced_tax = $tax['reduced'];
+
+        $this->due_total = $this->due_purchase
+                         + $this->due_pointing;
+
+        // 税10％対象、税8%対象を格納
+        $this->purchase_including_tax10 = $this->due_normal_subtotal;
+        $this->purchase_including_tax8 = $this->due_reduced_subtotal;                        
+
+        if(0 == $this->due_total) // Invoice for Agency: to record that no payment is required
+            $this->status = InvoiceStatus::PKEY_PAID;
+
+        if(($c = $this->customer) && ($a = $c->ysdAccount) && $a->isValid())
+            $this->payment_id = Payment::PKEY_DIRECT_DEBIT;
+        else
+            $this->payment_id = Payment::PKEY_BANK_TRANSFER;
+    }
+
+    private function computeCommission()
+    {
+        return (0 - (int) $this->getCommissions()->sum('fee'));
+    }
+
+    private function computePointing()
+    {
+        return ((int) $this->getPointings()->sum('point_offset') /* 当社負担MAX％を控除した、代理店が負担するPt額 */
+              - (int) $this->getPointings()->sum('point_consume')/* 代理店の減収 */);
+    }
+
+    private function computePurchase()
+    {
+        return (int) $this->getPurchases()->sum('total_charge');
+    }
+
+    public function computeHandling()
+    {
+        return (int) $this->getPurchases()->sum('handling+postage');
+    }
+
+    public function computePointConsume()
+    {
+        return (int) $this->getPurchases()->sum('point_consume');
+    }
+
+    public function computePurchase10()
+    {
+        return (int) $this->getPurchases()->sum('tax10_price+taxHP_price');
+    }
+
+    public function computePurchase8()
+    {
+        return (int) $this->getPurchases()->sum('tax8_price');
+    }
+
+    public function computeTax()
+    {
+        $tax = ['normal' => 0, 'normal_subtotal' => 0, 'reduced' => 0, 'reduced_subtotal' => 0, 'tax_total' => 0];
+        foreach($this->getPurchases()->all() as $purchase){
+            foreach($purchase->items as $item) {
+               $tax['tax_total'] += $item->getUnitTax() * $item->quantity;
+               if($item->isReducedTax()){
+                   $tax['reduced_subtotal'] += ($item->getUnitPrice() + $item->getUnitTax()) * $item->quantity;
+                   $tax['reduced'] += $item->getUnitTax() * $item->quantity;
+               } else {
+                   $tax['normal_subtotal'] += ($item->getUnitPrice() + $item->getUnitTax()) * $item->quantity;
+                   $tax['normal'] += $item->getUnitTax() * $item->quantity;
+               }
+            }
+        }
+        return $tax;
+    }
+
+
+    public function expire()
+    {
+        if(InvoiceStatus::PKEY_ACTIVE != $this->status)
+            return null;
+
+        $this->status = InvoiceStatus::PKEY_VOID;
+        return $this->save();
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function find()
+    {
+        return new InvoiceQuery(get_called_class());
+    }
+
+    /**
+     * HPを除くコミッション
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCommissions()
+    {
+        return Commission::find()
+                         ->andWhere([
+                             'customer_id' => $this->customer_id,
+                             'EXTRACT(YEAR  FROM create_date)' => $this->year,
+                             'EXTRACT(MONTH FROM create_date)' => $this->month,
+                         ]);
+    }
+
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCompany()
+    {
+        return $this->hasOne(Company::className(), ['company_id' => 'company_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCreator()
+    {
+        return $this->hasOne(\backend\models\Staff::className(), ['staff_id' => 'created_by']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCustomer()
+    {
+        return $this->hasOne(Customer::className(), ['customer_id' => 'customer_id']);
+    }
+
+    public function getIsAgency()
+    {
+        return $this->is_agency = $this->customer->isAgency();
+    }
+
+    public function getAgencyOffice()
+    {
+        return $this->hasOne(AgencyOffice::className(), ['customer_id' => 'customer_id']);
+    }
+
+    /**
+     * @return integer
+     */
+    public function getDueDate()
+    {
+        $day = AgencyOffice::PAYMENT_DAY_15; // 毎月15日
+
+        // 代理店請求先テーブルにレコードがある場合は、支払日を元に算出する
+        // 99の場合は月末を算出する
+        if ($agency = $this->agencyOffice)
+            $day = ($agency->payment_date == AgencyOffice::PAYMENT_DAY_ENDOFMONTH) ? 't' : $agency->payment_date;
+
+        $ymd = strtotime(sprintf('%04d-%02d-01 +1 month', $this->year, $this->month));
+        $ymd = strtotime(date("Y-m-{$day}", $ymd));
+
+        if('Sat' == date('D', $ymd)) {
+            $ymd = $ymd + (3600 * 24 * 2); // + 2 day
+        }
+        if('Sun' == date('D', $ymd)) {
+            $ymd = $ymd + (3600 * 24 * 1); // + 1 day
+        }
+
+        // TODO: 暫定的な対応。休日管理が実装できたら変更を行う
+        if('01-01' == date('m-d', $ymd)) {
+            $ymd = $ymd + (3600 * 24 * 3);
+        }
+
+        return $ymd;
+    }
+
+    /* @return integer */
+    public function getMonth()
+    {
+        return (int) date('m', strtotime($this->target_date));
+    }
+
+    public function getNext()
+    {
+        return static::find()
+            ->active()
+            ->andWhere(['>','invoice_id', $this->invoice_id])
+            ->orderBy('invoice_id ASC')
+            ->one();
+    }
+
+    public function getPayment()
+    {
+        return $this->hasOne(Payment::className(),['payment_id' => 'payment_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPointings()
+    {
+        return Pointing::find()
+                       ->active()
+                       ->andWhere([
+                           'seller_id' => $this->customer_id,
+                           'EXTRACT(YEAR  FROM create_date)' => $this->year,
+                           'EXTRACT(MONTH FROM create_date)' => $this->month,
+                       ])
+                       ->andWhere(['not', ['customer_id' => null]])
+                       ->andWhere(['not', ['customer_id' => $this->customer_id]]);
+    }
+
+
+    public function getPrev()
+    {
+        return static::find()
+            ->active()
+            ->andWhere(['<','invoice_id', $this->invoice_id])
+            ->orderBy('invoice_id DESC')
+            ->one();
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPurchases()
+    {
+        $payments = [
+            Payment::PKEY_BANK_TRANSFER,
+            Payment::PKEY_DIRECT_DEBIT,
+        ];
+
+        return Purchase::find()
+                       ->active()
+                       ->andWhere(['not', ['status'=> [PurchaseStatus::PKEY_PREORDER]]])
+                       ->andWhere(['payment_id' => $payments])
+                       ->andWhere([
+                           'customer_id' => $this->customer_id,
+                           'EXTRACT(YEAR  FROM create_date)' => $this->year,
+                           'EXTRACT(MONTH FROM create_date)' => $this->month,
+                       ]);
+    }
+
+
+    public function getStatus()
+    {
+        $this->hasOne(InvoiceStatus::className(),['istatus_id'=>'status']);
+    }
+
+    /* @return integer */
+    public function getYear()
+    {
+        return (int) date('Y', strtotime($this->target_date));
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getUpdator()
+    {
+        return $this->hasOne(\backend\models\Staff::className(), ['staff_id' => 'updated_by']);
+    }
+
+    public function isPaid()
+    {
+        return(InvoiceStatus::PKEY_PAID == $this->status);
+    }
+
+    public function isSent()
+    {
+        return MailLog::find()->where([
+            'tbl'  => self::tableName(),
+            'pkey' => $this->invoice_id,
+        ])->exists();
+    }
+
+    public function isVoid()
+    {
+        return(InvoiceStatus::PKEY_VOID == $this->status);
+    }
+
+    public function paid()
+    {
+        if(InvoiceStatus::PKEY_ACTIVE != $this->status)
+            return false;
+
+        $this->status = InvoiceStatus::PKEY_PAID;
+
+        return $this->save();
+    }
+
+    public function activate()
+    {
+        if(InvoiceStatus::PKEY_PAID != $this->status)
+            return false;
+
+        $this->status = InvoiceStatus::PKEY_ACTIVE;
+
+        return $this->save();
+    }
+}
+
+class InvoiceQuery extends \yii\db\ActiveQuery
+{
+    public function active($state = true)
+    {
+        $condition = ['rtb_invoice.status' => [InvoiceStatus::PKEY_ACTIVE, InvoiceStatus::PKEY_PAID]];
+
+        if($state)
+            return $this->andWhere($condition);
+        else
+            return $this->andWhere(['not', $condition]);
+    }
+
+    public function month($m)
+    {
+        return $this->andWhere(['EXTRACT(MONTH FROM target_date)' => $m]);
+    }
+
+    public function year($y)
+    {
+        return $this->andWhere(['EXTRACT(YEAR FROM target_date)' => $y]);
+    }
+
+}

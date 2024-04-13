@@ -1,0 +1,557 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+use \yii\helpers\ArrayHelper;
+
+/**
+ * This is the model class for table "dtb_purchase_item".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/PurchaseItem.php $
+ * $Id: PurchaseItem.php 2386 2016-04-07 06:14:03Z mori $
+ *
+ * @property integer $purchase_id
+ * @property integer $product_id
+ * @property integer $company_id
+ * @property integer $quantity
+ * @property integer $price
+ * @property integer $discount_rate
+ * @property integer $discount_amount
+ * @property integer $point_rate
+ * @property integer $point_amount
+ * @property integer $point_consume
+ * @property integer $point_consume_rate
+ * @property integer $is_wholesale
+ *
+ * @property DtbPurchase $purchase
+ * @property DtbProduct $product
+ */
+class PurchaseItem extends \yii\db\ActiveRecord
+{
+    const SCENARIO_PRODUCT = 'product';
+    const SCENARIO_REMEDY  = 'remedy';
+
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'dtb_purchase_item';
+    }
+
+    public static function primaryKey()
+    {
+        return ['purchase_id'];
+    }
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['purchase_id', 'company_id', 'code', 'quantity', 'price'], 'required'],
+            [['product_id'], 'required', 'on'=>self::SCENARIO_PRODUCT],
+            ['campaign_id', 'exist','targetClass'=>Campaign::className()],
+            [['remedy_id'],  'required', 'on'=>self::SCENARIO_REMEDY],
+            [['purchase_id', 'product_id', 'remedy_id', 'is_wholesale', 'price', 'unit_price', 'unit_tax', 'tax_rate'], 'integer'],
+            [['quantity', 'discount_rate', 'discount_amount', 'point_rate', 'point_amount', 'point_consume'], 'integer', 'min' => 0],
+            ['purchase_id', 'exist', 'targetClass'=>Purchase::className()],
+            ['product_id',  'exist', 'targetClass'=>Product::className()],
+            ['remedy_id',  'exist', 'targetClass'=>Remedy::className()],
+            ['company_id', 'default', 'value' => function($model, $attribute) {
+                return \yii\helpers\ArrayHelper::getValue($model, 'model.company.company_id');
+            }],
+            ['remedy_id', 'default', 'value' => 0 ],
+            [['discount_rate','discount_amount','point_rate','point_amount', 'point_consume', 'minus_product', 'point_consume_rate'], 'default', 'value' => 0 ],
+            [['name'], 'string', 'max' => 255],
+            [['point_consume_rate'], 'integer', 'min' => 0, 'max' => 100],
+            [['tax_rate', 'sku_id'], 'safe'],
+        ];
+    }
+
+    /* @inheritdoc */
+    public function scenarios()
+    {
+        return [
+            self::SCENARIO_DEFAULT             => self::attributes(),
+            self::SCENARIO_PRODUCT             => self::attributes(),
+            self::SCENARIO_REMEDY              => self::attributes(),
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'purchase_id'     => "注文番号",
+            'company'         => "販社",
+            'product_id'      => "商品ID",
+            'remedy_id'       => "レメディーID",
+            'campaign_id'     => 'キャンペーン',
+            'is_wholesale'    => '卸売',
+            'quantity'        => "数量",
+            'price'           => "定価",
+            'basePrice'       => "定価小計",
+            'unit_price'       => "販売単価",
+            'unit_tax'         => "消費税",
+            'point_consume'   => "ポイント使用額",
+            'charge'          => "小計",
+            'code'            => "コード",
+            'pickcode'        => "PICKコード",
+            'name'            => "商品名",
+            'seq'             => "連番",
+            'parent'          => "所属",
+            'discount_rate'   => "値下げ％",
+            'discount_amount' => "値下げ￥",
+            'point_rate'      => "ポイント％",
+            'point_amount'    => "ポイント点",
+            'pointTotal'      => "ポイント小計",
+            'point_consume_rate'      => "ポイント使用割合",
+            'tax_rate'        => "消費税率",
+            'sku_id'        => "SKU_ID"
+        ];
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCategory()
+    {
+        return Category::find()->where(['category_id'=>$this->model->category->category_id]);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCompany()
+    {
+        return $this->hasOne(Company::className(), ['company_id' => 'company_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getChildren()
+    {
+        return $this->hasMany(self::className(), ['purchase_id' => 'purchase_id', 'parent'=>'seq']);
+    }
+
+    public function getCharge()
+    {
+        if($this->discount_amount)
+            return $this->basePrice - ($this->discount_amount * $this->quantity);
+
+        return $this->basePrice;
+    }
+
+    /**
+     * 販売金額（１商品あたり）
+     **/
+    public function getUnitPrice()
+    {
+
+        if($this->discount_amount)
+            return $this->unit_price = $this->price - $this->discount_amount;
+
+
+        return $this->unit_price = $this->price;
+    }
+
+    /**
+     * 消費税（１商品あたり）
+     **/
+    public function getUnitTax($getOld = false)
+    {
+        if(isset($this->unit_tax))
+            return $this->unit_tax;
+
+        if($getOld) {
+            $rate = 0.08;
+        } else {
+            $rate = $this->isReducedTax() ? \common\models\Tax::findOne(2)->getRate()/100 : \common\models\Tax::findOne(1)->getRate()/100;
+        }
+
+        if($this->discount_amount)
+            return $this->unit_tax = floor(($this->price - $this->discount_amount) * $rate);
+
+
+        return $this->unit_tax = floor($this->price * $rate);
+    }
+
+    /**
+     * ポイント使用額（１商品あたり）
+     *   ヘッダー（Purchase.php）のcomputeによりセットされる値
+     **/
+    public function getPointConsume()
+    {
+        return $this->point_consume;
+    }
+
+    public function getDiscountAmount()
+    {
+
+        if($this->discount_amount) {
+            return $this->discount_amount;
+        }
+        else if($this->discount_rate) {
+	    $this->setDiscountAmount(floor($this->price * $this->discount_rate / 100));
+            return $this->discount_amount;//floor($this->price * $this->discount_rate / 100);
+        }
+        return 0;
+    }
+
+    public function getCode()
+    {
+        return $this->code;
+    }
+
+    public function getBarCode()
+    {
+        // 該当商品が書籍であればisbnを、そうでなければJANコードをdtb_product_janから取得できればJANコード、どちらもなければ商品番号をcodeにセットする
+        $code = "";
+        if($this->product && $this->product->isBook() && $this->product->bookinfo) {
+            $code = $this->product->bookinfo->isbn;
+
+        } else {
+            
+            if($this->product && $this->product->productJan) {
+                $code = $this->product->productJan->jan;
+            } else {
+                if(is_numeric($this->code) && (13 == strlen($this->code))) // ean13 is set as product code
+                     return $this->code;
+
+                $code  = sprintf('%02d%010d', \common\models\Product::EAN13_PREFIX, $this->product_id);
+                $code .= \common\components\ean13\CheckDigit::generate($code);
+            }
+        }
+
+        return $code;
+    }
+
+    /**
+     * ProductItem ComplexRemedyFormなどは数量がqtyで定義されているため、同じ処理で呼び出された時に対応できるようにする
+     *
+     **/
+    public function getQty()
+    {
+        return $this->quantity;
+    }
+
+    public function getDiscountRate()
+    {
+        if($this->discount_rate)
+            return $this->discount_rate;
+
+        else if($this->discount_amount) {
+	    $this->setDiscountRate(round($this->discount_amount / $this->price * 100));
+            return $this->discount_rate; //round($this->discount_amount / $this->price * 100);
+        }
+        return 0;
+    }
+
+    public function getDiscountTotal()
+    {
+
+        if($this->discount_amount)
+            return $this->quantity * $this->discount_amount;
+
+        return 0;
+    }
+
+    public function getImage()
+    {
+        return $this->model->image;
+    }
+
+    public function getImg()
+    {
+        if(! $images = $this->model->images)
+            return null;
+
+        if(is_object($images))
+             $image = $images;
+
+        elseif(is_array($images) && (! $image = array_shift($images)))
+            return null;
+
+        if(! isset($image))
+            return null;
+
+        return \yii\helpers\Html::img($image->url, ['width'=>'60px','height'=>'60px']);
+    }
+
+    public function getModel()
+    {
+        if($this->product)
+            return $this->product;
+
+        if($this->stock)
+            return $this->stock;
+
+        if($this->remedy_id)
+            return RemedyStock::findByBarcode($this->code);
+
+        return null;
+    }
+
+    public function getPickcode()
+    {
+        return \yii\helpers\ArrayHelper::getValue($this,'model.pickcode');
+    }
+
+    public function getPointAmount()
+    {
+        if($this->point_amount >= 0) {
+            return $this->point_amount;
+        }
+        else {
+            $point = floor(($this->price - $this->discount_amount) * $this->point_rate / 100);
+            if($point < 0) {
+                $this->setPointAmount(0);
+                return 0;
+            } else {
+                $this->setPointAmount($point);
+            }
+
+            //$this->setPointAmount(floor(($this->price - $this->discount_amount) * $this->point_rate / 100));
+            return $this->point_amount;
+       }
+
+        return 0;
+
+    }
+
+    public function getPointRate()
+    {
+        if($this->point_rate)
+            return $this->point_rate;
+
+        return 0;
+    }
+
+    public function getPointTotal()
+    {
+        if($this->point_amount >= 0) {
+            return floor($this->quantity * $this->point_amount);         
+        }
+
+        if($this->point_rate){
+            return $this->quantity * floor(($this->price * $this->point_rate / 100) * (1 - $this->discount_rate/100));
+        }
+
+        return 0;
+    }
+
+    public function getPointConsumeRate()
+    {
+        return $this->point_consume_rate;
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getProduct()
+    {
+        return $this->hasOne(Product::className(), ['product_id' => 'product_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPurchase()
+    {
+        return $this->hasOne(Purchase::className(), ['purchase_id' => 'purchase_id']);
+    }
+
+    public function getShortName()
+    {
+        return (preg_match('/滴下/u',$this->name) ? '+' : '')
+              . preg_replace('/(combination|プラスチック|ガラス|瓶|滴下|\([^()]+\))/u','', $this->name);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getStock()
+    {
+        return RemedyStock::findByCode($this->code);
+    }
+    
+    public function getStocks()
+    {
+        return $this->hasMany(RemedyStock::className(), ['remedy_id' => 'remedy_id']);
+    }
+
+    public function getUrl()
+    {
+        if($this->product)
+            return $this->product->url;
+
+        return null;
+    }
+
+    public function isLiquor()
+    {
+        return $this->model->isLiquor();
+    }
+
+    public function getIsWholesale()
+    {
+        return $this->is_wholesale;
+    }
+
+    public function setIs_wholesale($is_wholesale)
+    {
+         $this->is_wholesale = $is_wholesale;
+    }
+
+
+    public function setDiscount(\common\components\cart\ItemDiscount $model)
+    {
+
+        if($model->amount)
+            $this->setDiscountAmount($model->amount);
+        
+        if($model->rate)
+            $this->setDiscountRate($model->rate);
+    }
+
+    public function setDiscountAmount($vol)
+    {
+        $this->discount_amount = $vol;
+
+    }
+
+    public function setDiscountRate($vol)
+    {
+        $this->discount_rate   = $vol;
+    }
+
+    public function setPoint(\common\components\cart\ItemPoint $model)
+    {
+        if($model->amount)
+            $this->setPointAmount($model->amount);
+        
+        if($model->rate)
+            $this->setPointRate($model->rate);
+    }
+
+    public function setPointAmount($vol)
+    {
+        if($vol < 0 ) {
+            $this->point_amount = 0;
+        } else {
+            $this->point_amount = $vol;
+        }
+    }
+
+    public function setPointRate($vol)
+    {
+        $this->point_rate   = $vol;
+    }
+
+    public function setUnitPrice($vol)
+    {
+        $this->unit_price   = $vol;
+    }
+
+    public function setUnitTax($vol)
+    {
+        $this->unit_tax   = $vol;
+    }
+
+    public function setPointConsume($vol)
+    {
+        $this->point_consume   = $vol;
+    }
+
+    public function setPointConsumeRate($vol)
+    {
+        $this->point_consume_rate   = $vol;
+    }
+
+    public function getBasePrice()
+    {
+        return ($this->quantity * $this->price);
+    }
+
+    public function getTaxPrice()
+    {
+        return ($this->quantity * ($this->unit_price + $this->unit_tax));
+    }
+
+    public function isReducedTax() {
+        if($this->product_id) {
+            if($this->product->tax_id == 2) {
+                return true;
+            }
+        } else if($this->model instanceof \common\models\RemedyStock) {
+            return $this->model->isRemedy() && !$this->model->isLiquor();
+        }
+
+        return false;
+
+    }
+
+    public function getTaxRate()
+    {
+        return $this->isReducedTax() ? \common\models\Tax::findOne(2)->getRate() : \common\models\Tax::findOne(1)->getRate();
+    }
+
+    public function setTaxRate($val)
+    {
+        $this->tax_rate = $val;
+    }
+
+    public function getSkuId()
+    {
+        return $this->sku_id ? $this->sku_id : ($this->model instanceof \common\models\Product && $this->model->code == "VEG") ? $this->getVegSkuId($this->code) : $this->model->getSkuId();
+    }
+
+    public function setSkuId($val)
+    {
+        $this->sku_id = $val;
+    }
+
+    /** 
+     *  野菜用SKU_ID（1-2桁目：23、3桁目：野菜(0) or その他(1)、4-12桁目：vegetable_id、13桁目：チェックデジット）
+     *  @param string code
+     **/
+    public function getVegSkuId($code)
+    {
+        // 既存の野菜のコードは1-2桁目：23、3桁目：野菜(0) or その他(1)、4-8桁目：vegetable_id、8-12桁目：税別価格、13桁目：チェックデジット
+        $veg_id = (int) substr($code, 3, 4);
+        $is_other = (int) substr($code,2,1);
+        $base  = sprintf('23%d%09d', $is_other, $veg_id);
+        $check = \common\components\ean13\CheckDigit::generate($base);
+        return $base . $check;
+
+
+    }
+
+
+    public function beforeSave($insert)
+    {
+        if(0 === $this->product_id)
+            $this->product_id = null;
+
+        return parent::beforeSave($insert);
+    }
+
+    public function beforeValidate()
+    {
+        return parent::beforeValidate();
+    }
+
+    // TODO:HE代理店にTY商品を卸す
+    public function dump()
+    {
+        $dump = $this->attributes;
+
+        return $dump;
+    }
+}

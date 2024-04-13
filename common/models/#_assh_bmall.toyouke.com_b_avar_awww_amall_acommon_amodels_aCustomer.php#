@@ -1,0 +1,976 @@
+<?php
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "dtb_customer".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/Customer.php $
+ * $Id: Customer.php 1450 2015-09-02 13:54:52Z mori $
+ *
+ * @property integer $customer_id
+ * @property string $name01
+ * @property string $name02
+ * @property string $kana01
+ * @property string $kana02
+ * @property integer $sex_id
+ * @property string $birth
+ * @property string $email
+ * @property string $zip01
+ * @property string $zip02
+ * @property integer $pref_id
+ * @property string $addr01
+ * @property string $addr02
+ * @property string $tel01
+ * @property string $tel02
+ * @property string $tel03
+ *
+ * @property MtbSex $sex
+ * @property MtbPref $pref
+ * @property DtbCustomerAddrbook[] $dtbCustomerAddrbooks
+ * @property DtbCustomerFavorite[] $dtbCustomerFavorites
+ * @property DtbPurchase[] $dtbPurchases
+ */
+class Customer extends \yii\db\ActiveRecord implements \yii\web\IdentityInterface
+{
+    const EAN13_PREFIX      = 28;
+
+    const DATETIME_MAX      = '3000-00-00 00:00:00';
+    const SCENARIO_ZIP2ADDR = 'zip2addr';
+    const SCENARIO_CHILDMEMBER = 'child';
+
+    private $_checkdigit;
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'dtb_customer';
+    }
+
+    public function init()
+    {
+        parent::init();
+    }
+
+    public function behaviors()
+    {
+        return [
+            'pkey'=>[
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => 'customer_id',
+                ],
+                'value' => function ($event) {
+                    return self::find()->select('customer_id')->max('customer_id') + 1;
+                },
+            ],
+            'update'=>[
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['create_date','update_date'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => 'update_date',
+                ],
+                'value' => function ($event) {
+                    return new \yii\db\Expression('NOW()');
+                },
+            ],
+            'entry'=>[
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['entry_date'],
+                ],
+                'value' => function ($event) {
+                    return $this->entry_date ? $this->entry_date : new \yii\db\Expression('NOW()');
+                },
+            ],
+            'membercode'=>[
+                'class' => FixMembercode::className(),
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        $basics = ['name01','name02','kana01','kana02','email','zip01','zip02','pref_id','addr01','addr02','tel01','tel02','tel03'];
+
+        return [
+            [$basics, 'filter', 'filter' => 'trim'],
+            [$basics, 'required', 'except'=> [self::SCENARIO_CHILDMEMBER] ],
+            [['name01','name02','kana01','kana02'], 'required', 'on'=> [self::SCENARIO_CHILDMEMBER] ],
+            [['email','zip01','zip02','addr01','addr02','tel01','tel02','tel03','password_hash'], 'default','value'=>'', 'on'=> [self::SCENARIO_CHILDMEMBER] ],
+            [$basics, 'safe'],
+            ['email', 'email'],
+            ['email', 'unique', 'targetClass' => '\common\models\Customer', 'message' => "入力されたメールアドレスはすでに登録されています。"],
+            [['sex_id', 'pref_id'], 'integer'],
+            ['sex_id',   'default', 'value'=> 0       ],
+            ['sex_id',   'in',      'range'=> [0,1,2,9]],
+            ['grade_id', 'default', 'value'=> CustomerGrade::PKEY_AA ],
+            ['grade_id', 'exist',   'targetClass'=> CustomerGrade::className() ],
+            [['birth'],  'default', 'value'=> null],
+            [['name01', 'name02', 'kana01', 'kana02'], 'string', 'max' => 128],
+            [['email', 'addr01', 'addr02'], 'string', 'max' => 255],
+            [['zip01'],          'string', 'max' => 3],
+            [['zip02'],          'string', 'max' => 4],
+            [['tel01'],          'string', 'max' => 5],
+            [['tel02', 'tel03'], 'string', 'min' => 1, 'max' => 6],
+            [['zip01','zip02','tel01','tel02','tel03'],  'integer'],
+            ['pref_id',  'integer', 'min'=>1, 'max'=>48, 'message'=>"選択してください"],
+            ['subscribe', 'integer','min'=>0,'max'=>3],
+        ];
+    }
+
+    public function scenarios()
+    {
+        return array_merge(parent::scenarios(),[
+            self::SCENARIO_ZIP2ADDR    => ['zip01','zip02'],
+            self::SCENARIO_CHILDMEMBER => self::attributes(),
+        ]);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'customer_id'=> '顧客ID',
+            'code'       => "会員証NO",
+            'point'      => "ポイント保有",
+            'name'       => "お名前",
+            'kana'       => "かな",
+            'sex'        => "性別",
+            'age'        => "年齢",
+            'zip'        => "郵便番号",
+            'pref'       => "都道府県",
+            'addr'       => "住所",
+            'fulladdress'=> "住所",
+            'grade'      => "大区分",
+            'membership' => "属性",
+            'tel'        => "電話",
+            'name01'     => "姓",
+            'name02'     => "名",
+            'kana01'     => "せい",
+            'kana02'     => "めい",
+            'sex'        => "性別",
+            'pref_id'    => "都道府県",
+            'email'      => "メールアドレス",
+            'password'   => "パスワード",
+            'birth'      => "生年月日",
+            'addr01'     => "市区町村名",
+            'addr02'     => "番地・ビル名",
+            'subscribe'  => "DM・メルマガ送付について",
+            'create_date'=> "作成日",
+        ];
+    }
+
+    public function attributeHints()
+    {
+        return [
+            'addr02'  => '自宅住所をご登録ください。自宅住所をご事情により登録できない方は、勤務先等、他の住所でも結構です。商品お届け先は、ご注文時に指定できます。',
+            'birth'   => 'お酒（マザーチンクチャーなど）の購入において必須となります。',
+        ];
+    }
+
+    /************ GETTER METHODS *************/
+    /**
+     * @return string
+     */
+    public function getAddr()
+    {
+        return sprintf('%s %s %s', 
+                       ($this->pref ? $this->pref->name : ''),
+                       $this->addr01,
+                       $this->addr02);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getAddrbooks()
+    {
+        return $this->hasMany(CustomerAddrbook::className(), ['customer_id' => 'customer_id']);
+    }
+
+    /* @return integer */
+    public function getAge()
+    {
+        if(! $this->birth || preg_match('/0000/', $this->birth))
+            return null;
+
+        $birth = strtotime($this->birth);
+        $now   = time();
+        
+        return intval(($now - $birth) / (365 * 24 * 60 * 60));
+    }
+
+    /**
+     * @return string
+     */
+    public function getAuthKey()
+    {
+        return $this->auth_key;
+    }
+
+    public function getBarcode()
+    {
+        if($this->membercode)
+            return $this->membercode->barcode;
+
+        return null;
+    }
+
+    /* @return string | null */
+    public function getCode()
+    {
+        if($this->membercode)
+            return $this->membercode->code;
+
+        return null;
+    }
+
+    public function getCompanies()
+    {
+        return $this->hasMany(Membership::className(), ['membership_id' => 'membership_id'])
+               ->viaTable('dtb_customer_membership',['customer_id'=>'customer_id']);
+    }
+
+    public function getCheckdigit()
+    {
+        if(isset($this->_checkdigit))
+            return $this->_checkdigit;
+
+        $src = self::EAN13_PREFIX . $this->code;
+        $cd = new \common\components\ean13\CheckDigit();
+        if(false === ($this->_checkdigit = $cd->generate($src)))
+            Yii::error(sprintf('CheckDigit was not generate from code(%s)', $this->code), $this->className()."::".__FUNCTION__);
+
+        return $this->_checkdigit;
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCommissions()
+    {
+        return $this->hasMany(Commision::className(), ['customer_id' => 'customer_id']);
+    }
+
+    /* @return bool */
+    public function getExpired()
+    {
+        return (strtotime($this->expire_date) <= time());
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getFavorites()
+    {
+        return $this->hasMany(CustomerFavorite::className(), ['customer_id' => 'customer_id']);
+    }
+
+    public function getFullAddress()
+    {
+        return sprintf('〒%s %s %s %s', $this->zip,
+                       ($this->pref ? $this->pref->name : ''),
+                       $this->addr01,
+                       $this->addr02);
+    }
+
+    /** 
+     * @return \yii\db\ActiveQuery
+     */
+    public function getGrade()
+    {
+        return $this->hasOne(CustomerGrade::className(), ['grade_id' => 'grade_id']);
+    }
+    /**
+     * @inheritdoc
+     */
+    public function getId()
+    {
+        return $this->getPrimaryKey();
+    }
+
+    /**
+     * @return string
+     */
+    public function getKana()
+    {
+        return sprintf('%s %s', $this->kana01, $this->kana02);
+    }
+
+    /**
+     * @return string
+     */
+    public function getName()
+    {
+        if(! $this->name01 && ! $this->name02)
+            return '';
+
+        return sprintf('%s %s', $this->name01, $this->name02);
+    }
+
+    public function getChildren($active=true)
+    {
+        $query = $this->hasMany(self::className(), ['customer_id' => 'child_id'])
+            ->viaTable(CustomerFamily::tableName(), ['parent_id' => 'customer_id'])
+            ->orderBy('birth ASC');
+
+        if($active)
+            $query->where('expire_date > NOW()');
+
+        return $query;
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getMemberTypes()
+    {
+        return $this->hasMany(Membership::className(), ['membership_id' => 'membership_id'])
+                    ->viaTable(CustomerMembership::tableName(), ['customer_id' => 'customer_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getMemberships($expired=false)
+    {
+        $query = $this->hasMany(CustomerMembership::className(), ['customer_id' => 'customer_id']);
+        if(! $expired)
+            $query->where(new \yii\db\Expression('expire_date > NOW()'));
+
+        return $query;
+    }
+
+    /* @return \yii\db\ActiveQuery */
+    public function getMembercode()
+    {
+        return $this->hasOne(Membercode::className(), ['customer_id' => 'customer_id'])->inverseOf('customer');
+    }
+
+    public function getParent()
+    {
+        return $this->hasOne(self::className(), ['customer_id' => 'parent_id'])
+            ->viaTable(CustomerFamily::tableName(), ['child_id' => 'customer_id']);
+    }
+
+    public function getPasswordResetToken()
+    {
+        return $this->hasOne(\common\models\PasswordResetToken::className(), ['email' => 'email']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPointings()
+    {
+        return $this->hasMany(Pointing::className(), ['customer_id' => 'customer_id'])->inverseOf('customer');
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPurchases()
+    {
+        return $this->hasMany(Purchase::className(), ['customer_id' => 'customer_id'])->inverseOf('customer');
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getPref()
+    {
+        if(! $this->pref_id && $this->parent)
+            return $this->parent->pref;
+
+        if(! $this->pref_id)
+            return new NullPref();
+
+        return $this->hasOne(Pref::className(), ['pref_id' => 'pref_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getRecipes($byMe=false)
+    {
+        if($byMe)
+            return $this->hasMany(Recipe::className(), ['homoeopath_id' => 'customer_id'])->inverseOf('homoeopath');
+
+        return $this->hasMany(Recipe::className(), ['client_id' => 'customer_id'])->inverseOf('client');
+    }
+
+    /**
+     * @return string
+     */
+    public function getTel()
+    {
+        return sprintf('%s-%s-%s', $this->tel01, $this->tel02, $this->tel03);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getSex()
+    {
+        return $this->hasOne(Sex::className(), ['sex_id' => 'sex_id']);
+    }
+
+    /**
+     * @return string
+     */
+    public function getUsername()
+    {
+        return $this->email;
+    }
+
+    /**
+     * @return string
+     */
+    public function getZip()
+    {
+        return sprintf('%s-%s', $this->zip01, $this->zip02);
+    }
+
+    /************ SPECIFIC CLASS METHODS *************/
+    /**
+     * @return bool
+     */
+    public function activate()
+    {
+        if(! $this->isExpired())
+            return true;
+
+        $this->expire_date = self::DATETIME_MAX;
+        return $this->save();
+    }
+
+    /**
+     * @return bool
+     */
+    public function belongsTo($company_id)
+    {
+        if($this->isExpired())
+            return false;
+
+        if($company_id == Company::PKEY_TY) // everyone belongs to TY by default
+            return true;
+
+        if(0 == count($this->memberships)) // has no membership
+            return false;
+
+        foreach($this->memberships as $membership)
+        {
+            if($membership->isExpired())
+                continue;
+
+            if($company_id == $membership->company->company_id)
+                return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @return bool
+     */
+    public function expire()
+    {
+        if($this->isExpired())
+            return true;
+
+        $this->expire_date = date('Y-m-d H:i:s');
+
+        return $this->save(false, ['expire_date']);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function find()
+    {
+        return new CustomerQuery(get_called_class());
+    }
+
+    /**
+     * Finds user by barcode
+     *
+     * @param string $email
+     * @return static|null
+     */
+    public static function findByBarcode($ean13, $strict = false)
+    {
+        $attr = static::parseBarcode($ean13);
+        if(empty($attr))
+            return null;
+
+        $model = static::find()->innerJoinWith('membercode')->andWhere(['mtb_membercode.code' => $attr['code']])->one();
+        if($model && ($model->membercode->checkdigit != $attr['checkdigit']))
+        {
+            Yii::warning(sprintf("supplied ean13 with wrong checkdigit(%s != %s)", $ean13, $model->barcode),self::className().'::'.__FUNCTION__);
+
+            if($strict)
+                return null;
+        }
+
+        return $model;
+    }
+
+    protected static function parseBarcode($ean13)
+    {
+        $pattern = sprintf('/^(%02d|)([0-9]{10})([0-9])?$/', self::EAN13_PREFIX);
+
+        if(! preg_match($pattern, $ean13, $match))
+            return [];
+        
+        return [
+            'code'       => $match[2],
+            'checkdigit' => isset($match[3]) ? $match[3] : 0,
+        ];
+    }
+
+    /**
+     * Finds user by email
+     *
+     * @param string $email
+     * @return static|null
+     */
+    public static function findByEmail($email)
+    {
+        $now = new \yii\db\Expression('NOW()');
+        return static::find()->andWhere(['>', $now, 'expire_date'])->andWhere(['email' => $email])->one();
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function findIdentity($id)
+    {
+        return static::findOne(['customer_id' => $id]);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function findIdentityByAccessToken($token, $type = null)
+    {
+        throw new NotSupportedException('"findIdentityByAccessToken" is not implemented.');
+    }
+
+    public function findByPasswordResetToken($token)
+    {
+        $model = \common\models\PasswordResetToken::find()
+               ->where(['token'=>$token])
+               ->active()
+               ->one();
+        
+        if($model)
+            $customer = self::findByEmail($model->email);
+
+        return isset($customer) ? $customer : null;
+    }
+
+    public function generatePasswordResetToken()
+    {
+        $transaction = Yii::$app->db->beginTransaction();
+
+        if($this->passwordResetToken)
+        {
+            $model = $this->passwordResetToken;
+        }
+        else
+        {
+            $model = new \common\models\PasswordResetToken();
+            $model->email = $this->email;
+        }
+
+        if($model->save())
+        {
+            $transaction->commit();
+        }
+        else
+        {
+            Yii::error("failed in PasswordResetToken::save()");
+
+            $transaction->rollBack();
+            return false;
+        }
+
+        return $model->token;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isExpired()
+    {
+        if($this->isNewRecord)
+            return false;
+
+        return (strtotime($this->expire_date) <= time());
+    }
+
+    public function isAgency()
+    {
+        return $this->isAgencyOf(Company::PKEY_HJ) ||
+               $this->isAgencyOf(Company::PKEY_HE) ||
+               $this->isAgencyOf(Company::PKEY_HP);
+    }
+
+    public function isAgencyOf($company)
+    {
+        if($company instanceof Company)
+            $company_id = $company->company_id;
+        if(is_numeric($company))
+            $company_id = $company;
+
+        if($company_id === Company::PKEY_HE)
+            return $this->isMemberOf(Membership::PKEY_AGENCY_HE);
+
+        if($company_id === Company::PKEY_HJ)
+            return ($this->isMemberOf(Membership::PKEY_AGENCY_HJ_A) ||
+                    $this->isMemberOf(Membership::PKEY_AGENCY_HJ_B));
+
+        if($company_id === Company::PKEY_HP)
+            return $this->isMemberOf(Membership::PKEY_AGENCY_HP);
+
+        return false;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isAdult()
+    {
+        if(! $this->parent)
+            return true;
+
+        if(20 <= $this->age)
+            return true;
+
+        return false;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isHomoeopath()
+    {
+        $target_id = Membership::PKEY_HOMOEOPATH;
+
+        $q = (new \yii\db\Query())
+            ->from('dtb_customer_membership')
+            ->andwhere(['customer_id'   => $this->customer_id])
+            ->andWhere(['membership_id' => $target_id])
+            ->andWhere(['>', 'expire_date', new \yii\db\Expression('NOW()')])
+            ->andWhere(['<=','start_date' , new \yii\db\Expression('NOW()')]);
+
+        return (int) $q->count();
+    }
+
+    /**
+     * @return bool
+     */
+    public function isMemberOf($membership_id)
+    {
+        $data = \yii\helpers\ArrayHelper::getColumn($this->memberships, 'membership_id');
+        
+        if(false === array_search($membership_id, $data))
+            return false;
+
+        foreach($this->memberships as $membership)
+        {
+            if($membership->isExpired())
+                continue;
+
+            if($membership_id == $membership->membership_id)
+                return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @return bool
+     */
+    public function isStudentOf($membership_id)
+    {
+        if(! $this->belongsTo(Company::PKEY_HE))
+            return false;
+
+        return $this->isMemberOf($membership_id);
+    }
+
+    public function hasLiquorLicense()
+    {
+        return true;
+    }
+
+    /** 
+     * @return \yii\db\ActiveQuery
+     */
+    public function statusOf($membership)
+    {
+        return $membership->hasMany(CustomerMembership::className(), [
+            'membership_id' => 'membership_id',
+            'customer_id' => $this->customer_id])
+            ->addOrderBy(['membership_id' => SORT_ASC, 'start_date' => SORT_DESC]);
+    }
+
+    // public static function migrate($directive, $migrate_id)
+    // {
+        
+    // }
+
+    public function removePasswordResetToken()
+    {
+        $row = \common\models\PasswordResetToken::findOne(['email'=> $this->email]);
+        if($row)
+            $row->delete();
+    }
+
+    public function setAsToranokoGenericMember()
+    {
+        return CustomerMembership::setAsToranokoGenericMember($this);
+    }
+
+    public function setAsToranokoNetworkMember()
+    {
+        return CustomerMembership::setAsToranokoNetworkMember($this);
+    }
+
+    public function setAsToranokoFamilyMember($parent)
+    {
+        return CustomerMembership::setAsToranokoFamilyMember($this, $parent);
+    }
+
+    /**
+     * Generates password hash from password and sets it to the model
+     *
+     * @param string $password
+     */
+    public function setPassword($password)
+    {
+        $this->password_hash = Yii::$app->security->generatePasswordHash($password);
+    }
+
+    /**
+     * calculate Customer's Point
+     *
+     * @param string $datetime current datetime
+     * @return integer
+     */
+    public function currentPoint($datetime = null)
+    {
+        if(null === $datetime)
+            $datetime = date('Y-m-d H:i:s');
+
+        $cur_point = $this->db->createCommand('SELECT SUM(point_given) - SUM(point_consume) FROM dtb_purchase WHERE customer_id = :cid AND (shipped = 1 OR paid = 1) AND create_date <= :date')
+                  ->bindValues([
+                      ':cid'   => $this->customer_id,
+                      ':date'  => $datetime,
+                  ])
+                  ->queryScalar();
+
+        $cur_point += $this->db->createCommand('SELECT SUM(point_given) - SUM(point_consume) FROM dtb_pointing WHERE customer_id = :cid AND status = :status AND create_date <= :date')
+                  ->bindValues([
+                      ':cid'    => $this->customer_id,
+                      ':status' => Pointing::STATUS_SOLD,
+                      ':date'   => $datetime,
+                  ])
+                  ->queryScalar();
+
+        return $cur_point;
+    }
+    
+    /**
+     * Validates password
+     *
+     * @param string $password password to validate
+     * @return boolean if password provided is valid for current user
+     */
+    public function validatePassword($password)
+    {
+        return Yii::$app->security->validatePassword($password, $this->password_hash);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function validateAuthKey($authKey)
+    {
+        return $this->getAuthKey() === $authKey;
+    }
+
+    /**
+     * search address from zip code
+     * @return false or array of address
+     */
+    public function zip2addr()
+    {
+        $candidate = \common\models\Zip::zip2addr($this->zip01, $this->zip02);
+        if(! $candidate)
+        {
+            $this->addError('zip02', "郵便番号に一致する住所が検索できませんでした");
+            return false;
+        }
+
+        // apply the first address to self
+        $this->pref_id = $candidate->pref_id;
+        $this->addr01  = $candidate->addr01[0];
+
+        return $candidate->addr01;
+    }
+
+    /************ INHERITED METHODS *************/
+
+    public function afterFind()
+    {
+        $this->point    = $this->currentPoint();
+        $this->grade_id = CustomerGrade::currentGrade($this);
+
+        parent::afterFind();
+    }
+
+    /**
+     * @return boolean
+     */
+    public function beforeValidate()
+    {
+        $mode = 'Hcas'; // 英数字スペースは「半角」、「半／全カナ」は「全角かな」に
+        $this->kana01 = mb_convert_kana($this->kana01, $mode);
+        $this->kana02 = mb_convert_kana($this->kana02, $mode);
+
+        return parent::beforeValidate();
+    }
+
+    /**
+     * @return void
+     */
+    public function afterValidate()
+    {
+        if(! $this->hasErrors() && ('zip2addr' == $this->scenario))
+        {
+            $this->zip2addr();
+        }
+
+        parent::afterValidate();
+    }
+
+    /**
+     * @return boolean: whether allow save() or not
+     */
+    public function beforeSave($insert)
+    {
+        if(in_array($this->scenario, ['zip2addr']))
+           return false;
+
+        if (parent::beforeSave($insert))
+        {
+            if (true == $insert)
+            {
+                $this->auth_key    = Yii::$app->getSecurity()->generateRandomString();
+                $this->expire_date = self::DATETIME_MAX;
+            }
+            elseif(strtotime($this->expire_date) < time())
+            {
+                $this->addError('expire_date', "有効期限を過ぎたアカウントは編集できません");
+                return false;
+            }
+
+            return true;
+        }
+        return false;
+    }
+
+    public function afterSave($insert, $changedAttributes)
+    {
+        parent::afterSave($insert, $changedAttributes);
+    }
+
+}
+
+class CustomerQuery extends \yii\db\ActiveQuery
+{
+    public function active($state = true)
+    {
+        $now = new \yii\db\Expression('NOW()');
+
+        if($state)
+            return $this->andWhere(['>',  $now, 'expire_date']);
+        else
+            return $this->andWhere(['<=', $now, 'expire_date']);
+    }
+}
+
+class AddMembership extends \yii\base\Behavior
+{
+    public $customer_id;
+    public $membership_id;
+    public $start_date;
+    public $expire_date;
+
+    public function events()
+    {
+        return [
+            ActiveRecord::EVENT_AFTER_INSERT => 'afterInsert',
+        ];
+    }
+
+    public function afterInsert($event)
+    {
+        $profile = new CustomerMembership([
+            'customer_id'   => $this->customer_id,
+            'membership_id' => $this->membership_id,
+            'start_date'    => $this->start_date,
+            'expire_date'   => $this->expire_date,
+        ]);
+
+        $profile->save();
+    }
+
+}
+
+class FixMembercode extends \yii\base\Behavior
+{
+    public function events()
+    {
+        return [
+            Customer::EVENT_AFTER_INSERT => 'afterInsert',
+        ];
+    }
+
+    /* @return void */
+    public function afterInsert($event)
+    {
+        if(! $event->sender instanceof Customer)
+            // i don't know how to create membercode without customer_id
+            return;
+
+        $this->createMembercode($event->sender);
+    }
+
+    /* @return void */
+    private function createMembercode($sender)
+    {
+        $mcode = new Membercode([
+            'customer_id' => $sender->customer_id,
+        ]);
+
+        if(! $mcode->save())
+            Yii::error([
+                sprintf('saving Membercode failed for customer_id(%d)', $this->customer_id),
+                $mcode->erros,
+            ], self::className().'::'.__FUNCTION__);
+    }
+
+}
+

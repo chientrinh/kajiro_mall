@@ -1,0 +1,641 @@
+<?php
+
+namespace common\models\sodan;
+
+use Yii;
+
+/**
+ * This is the model class for table "dtb_sodan_itv".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/sodan/Interview.php $
+ * $Id: Interview.php 4145 2019-03-29 06:20:34Z kawai $
+ *
+ * @property integer $itv_id
+ * @property integer $homoeopath_id
+ * @property integer $client_id
+ * @property string $create_date
+ * @property string $update_date
+ * @property string $interview_date
+ * @property integer $status_id
+ * @property string $presence
+ * @property string $impression
+ * @property string $advice
+ * @property string $officer_use
+ */
+
+class Interview extends \yii\db\ActiveRecord
+{
+    const DURATION_45 = 45;
+    const DURATION_50 = 50;
+    const DURATION_60 = 60;
+
+    /* currently not used *
+       const SCENARIO_INIT  = 'init';
+       const SCENARIO_BOOK  = 'book';
+       const SCENARIO_WRITE = 'write';
+     */
+    const SCENARIO_PAY   = 'pay';
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'dtb_sodan_interview';
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function behaviors()
+    {
+        return [
+            'client' => [
+                'class' => InitClient::className(),
+                'owner' => $this,
+            ],
+            'client2' => [
+                'class' => FixClient::className(),
+                'client_id' => $this->client_id,
+            ],
+            'log' => [
+                'class'  => \common\models\ChangeLogger::className(),
+                'owner'  => $this,
+                'user'   => Yii::$app->has('user') ? Yii::$app->user : null,
+            ],
+            'staff_id' => [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['created_by','updated_by'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => ['updated_by'],
+                ],
+                'value' => function ($event) {
+                    if(! Yii::$app->get('user') || ! Yii::$app->user->identity instanceof \backend\models\Staff)
+                        return null;
+
+                    return Yii::$app->user->id;
+                },
+            ],
+            'homoeopath' => [
+                'class' => FixHomoeopath::className(),
+                'homoeopath_id' => $this->homoeopath_id,
+            ],
+            'update' => [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['create_date','update_date'],
+                    \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => ['update_date'],
+                ],
+                'value' => function ($event) {
+                    return date('Y-m-d H:i:s');
+                },
+            ],
+            'duplicate' => [
+                'class' => InterviewDuplicate::className(),
+                'owner' => $this,
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['homoeopath_id', 'branch_id', 'status_id', 'itv_date', 'duration'], 'required'],
+            ['itv_time', 'default', 'value' => '00:00:00'],
+            [['client_id','product_id'],'required','on'=>self::SCENARIO_PAY],
+            [['homoeopath_id', 'client_id', 'product_id', 'status_id', 'duration', 'ticket_id', 'purchase_id', 'open_flg'], 'integer'],
+            [['homoeopath_id', 'client_id'], 'exist', 'targetClass' => \common\models\Customer::className(), 'targetAttribute'=>'customer_id'],
+            ['branch_id', 'exist', 'targetClass'=>\common\models\Branch::className()],
+            ['purchase_id', 'exist', 'targetClass'=>\common\models\Purchase::className()],
+            ['ticket_id', 'exist', 'targetClass' => \common\models\DiscountProductLog::className()],
+            ['product_id', 'exist', 'targetClass'=>\common\models\Product::className()],
+            ['status_id','default','value' => InterviewStatus::PKEY_VACANT],
+            ['status_id', 'exist', 'targetClass'=>InterviewStatus::className()],
+            'status'=>['status_id','in','not'=>true,'range'=>[InterviewStatus::PKEY_READY,InterviewStatus::PKEY_ONGOING,InterviewStatus::PKEY_DONE,InterviewStatus::PKEY_CANCEL],'when'=>function($model){ return ! $model->client_id; },'message'=>'クライアント未指定でその状態にすることはできません','whenClient'=>"function (attribute, value) { return false; }"],
+            [['created_by','updated_by'], 'exist', 'targetClass'=>\backend\models\Staff::className(), 'targetAttribute'=>'staff_id', 'skipOnEmpty'=>true],
+            [['create_date', 'update_date', 'itv_date', 'itv_time'], 'safe'],
+            [['complaint','presence', 'impression', 'advice', 'officer_use', 'summary', 'progress', 'questionaire', 'note'], 'string'],
+//            ['itv_date','validateHoliday'],
+            ['itv_time','match','pattern'=>'/^[0-9]{1,2}:[0-9]{2}:?.*/'],
+            ['itv_time','validateTime'],
+            ['client_id','validateClient'],
+            ['homoeopath_id','validateHomoeopath'],
+            ['complaint','string',
+            'min' =>   1,
+            'max' => 255
+           ],
+           [['presence', 'advice', 'summary','questionaire','progress'],'string',
+            'min' =>   1,
+            'max' => 226927
+           ],
+        ];
+    }
+    
+    public function scenarios()
+    {
+        return array_merge(parent::scenarios(),[
+            self::SCENARIO_PAY => ['homoeopath_id','client_id','branch_id','product_id'],
+        ]);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'itv_id'         => '相談会ID',
+            'branch_id'      => '拠点',
+            'homoeopath_id'  => 'ホメオパス',
+            'client_id'      => 'クライアント',
+            'product_id'     => '相談種別',
+            'purchase_id'    => 'お会計',
+            'create_date'    => '起票日',
+            'update_date'    => '更新日',
+            'itv_date'       => '相談日',
+            'itv_time'       => '開始時刻',
+            'duration'       => '所要時間 (分)',
+            'status_id'      => '状態',
+            'complaint'      => '主訴',
+            'presence'       => 'クライアントの事前報告',
+            'impression'     => 'ホメオパス所見（聞き取り内容）',
+            'recipe'         => '適用書',
+            'advice'         => 'クライアントへのメッセージ（お手紙に出力されます）',
+            'officer_use'    => '事務欄',
+            'summary'        => '相談会まとめ',
+            'progress'       => '経過',
+            'questionaire'   => '質問票',
+            'end_time'       => '終了時刻',
+            'create_recipe'  => '適用書',
+            'ticket_id'      => '相談チケット',
+            'note'           => '備考',
+            'open_flg'       => '公開枠にする',
+        ];
+    }
+
+    public function attributeHints()
+    {
+        return [
+            'itv_time'      => '9:30 から 17:00 までを入力してください<br>※メール相談の場合は空欄入力可能です',
+            'homoeopath_id' => 'ホメオパス本人が登録する場合、自分が指定されます。',
+            'client_id'     => 'クライアントは相談会当日まで未指定でかまいません',
+            'advice'        => 'クライアントへのアドバイスがあれば入力します。次回相談のご案内と一緒に印刷されます(文字数制限なし)',
+            'officer_use'   => 'ホメオパスや事務局が、自分や相手のために何か書き残したいとき、ここに入力します(255文字まで)',
+            'note'          => '入力履歴等、引き継ぎたい内容を入力してください'
+        ];
+    }
+
+    public function afterSave($insert,$changedAttributes)
+    {
+        $query = Interview::find()
+               ->andWhere(['status_id'     => InterviewStatus::PKEY_VACANT])
+               ->andWhere(['homoeopath_id' => $this->homoeopath_id])
+               ->andWhere(['itv_date'      => $this->itv_date])
+               ->andWhere(['between', 'itv_time', $this->itv_time, date('H:i', $this->endTime)]);
+
+        if(! $this->isNewRecord)
+             $query->andWhere(['not', ['itv_id' => $this->itv_id]]);
+
+        // 予約待ちの枠が引き延ばされた場合開始時間を前の枠終了時間に合わせる
+        $result = $query->one();
+        if($result) {
+            // endTimeを使わずにやる
+            $end_time = strtotime($result->itv_date . ' ' . $result->itv_time) + $result->duration*60;
+            $new_start = strtotime($this->itv_date . ' ' . $this->itv_time) + $this->duration*60;
+            $result->itv_time = date('H:i:s', $new_start);
+            $result->duration = $end_time - $new_start > 0 ? intval(($end_time - $new_start)/60) : 0;
+
+            // 開始時刻を引き延ばされた枠が0分となったときに削除する
+            if(intval($result->duration) == 0) {
+                $result->delete();
+            } else {
+                $result->update();
+                $result->save(false);
+            }
+        }
+
+        $model = \common\models\sodan\WaitList::find()
+               ->active()
+               ->andWhere(['client_id' => $this->client_id])
+               ->one();
+        if($model)
+        {
+            $model->itv_id = $this->itv_id;
+            $model->save(false);
+        }
+
+        parent::afterSave($insert,$changedAttributes);
+    }
+
+    /* @return bool */
+    public function cancelate()
+    {
+        if(! $this->client || InterviewStatus::PKEY_CANCEL <= $this->status_id)
+            return false;
+
+        $this->status_id = InterviewStatus::PKEY_CANCEL;
+
+        return $this->save(false);
+    }
+
+    /**
+     * @inheritdoc
+     * @return DtbSodanItvQuery the active query used by this AR class.
+     */
+    public static function find()
+    {
+        // クライアントとホメオパスが定義済みなら「予約済み」にする
+        // 本当は beforeSave() とかで処理すべき
+        self::getDb()->createCommand('UPDATE dtb_sodan_interview SET status_id = :sid WHERE status_id < :sid and client_id is NOT NULL AND homoeopath_id IS NOT NULL')
+                     ->bindValues([':sid'=> InterviewStatus::PKEY_READY])
+                     ->execute();
+
+        return new InterviewQuery(get_called_class());
+    }
+
+    public function getBranch()
+    {
+        return $this->hasOne(\common\models\Branch::className(), ['branch_id'=>'branch_id']);
+    }
+
+    public function getClient()
+    {
+        return $this->hasOne(\common\models\Customer::className(), ['customer_id'=>'client_id']);
+    }
+
+    public function getSodanclient()
+    {
+        return $this->hasOne(\common\models\sodan\Client::className(), ['client_id'=>'client_id']);
+    }
+
+    public function getCreator()
+    {
+        return $this->hasOne(\backend\models\Staff::className(), ['staff_id' => 'created_by']);
+    }
+
+    public function getEndTime()
+    {
+        // every session should end at HH:59:00 or HH:49:00, a minute before next session
+        $sec = $this->duration * (60 - 1);
+
+        return strtotime($this->itv_date .' '. $this->itv_time) + $sec;
+    }
+
+    public function getHomoeopath()
+    {
+        return $this->hasOne(\common\models\Customer::className(), ['customer_id'=>'homoeopath_id']);
+    }
+
+    public function getPurchase()
+    {
+        return $this->hasOne(\common\models\Purchase::className(), ['purchase_id' => 'purchase_id']);
+    }
+
+    public function getProduct()
+    {
+        return $this->hasOne(\common\models\Product::className(),['product_id' => 'product_id']);
+    }
+
+    public function getRecipe()
+    {
+        return \common\models\Recipe::find()
+               ->andWhere(['itv_id' => $this->itv_id])
+               ->andWhere(['client_id' => $this->client_id])
+               ->andWhere(['not',['status'=>\common\models\Recipe::STATUS_VOID]])
+               ->orderBy(['create_date' => SORT_DESC])
+               ->limit(1);
+    }
+
+    public function getRecipes()
+    {
+        return $this->hasMany(\common\models\Recipe::className(),['itv_id' => 'itv_id', 'client_id' => 'client_id'])->andWhere(['IN', 'status', [0, 1]]);
+    }
+
+    public function getStartTime()
+    {
+        return strtotime($this->itv_date . ' ' . $this->itv_time);
+    }
+
+    public function getStatus()
+    {
+        return $this->hasOne(InterviewStatus::className(), ['status_id'=>'status_id']);
+    }
+
+    public function getUpdator()
+    {
+        return $this->hasOne(\backend\models\Staff::className(), ['staff_id' => 'updated_by']);
+    }
+
+    public function getTicket()
+    {
+        return $this->hasOne(\common\models\DiscountProductLog::className(), ['ticket_id' => 'ticket_id']);
+    }
+
+    public function getPastitv()
+    {
+        if (!$this->client_id) {
+            return null;
+        }
+
+        $query = Interview::find()
+               ->active()
+               ->andWhere(['client_id' => $this->client_id])
+               ->andWhere(['homoeopath_id' => $this->homoeopath_id])
+               ->andWhere(['<=', "CONCAT(itv_date, ' ', itv_time)", "{$this->itv_date} {$this->itv_time}"])
+               // 途中相談は除く
+               ->andWhere(['<>', 'product_id', 441]);
+
+        return $query->count();
+    }
+
+    /**
+     * @brief ホメオパスとクライアントの組み合わせが過去にもあったかどうか
+     * @return bool
+     */
+    public function hadMetBefore()
+    {
+        $query = $this->hasOne(self::className(),['homoeopath_id'=> 'homoeopath_id',
+                                                  'client_id'    => 'client_id'    ])
+                      ->active();
+
+        if(! $this->isNewRecord)
+            $query->andWhere(['<','itv_date',$this->itv_date]);
+
+        return $query->exists();
+    }
+
+    public function isExpired()
+    {
+        return (InterviewStatus::PKEY_CANCEL <= $this->status_id);
+    }
+
+    public function validateClient($attr, $params)
+    {
+        if($this->isExpired())
+            return true;
+
+        if(! $this->itv_time || ! $this->itv_date || ! $this->duration)
+            return false;
+
+        $query = Interview::find()
+               ->active()
+               ->andWhere(['client_id' => $this->client_id])
+               ->andWhere(['itv_date'  => $this->itv_date])
+               ->andWhere(['itv_time'  => $this->itv_time]);
+
+        if(! $this->isNewRecord)
+             $query->andWhere(['not',['itv_id'=>$this->itv_id]]);
+
+        if($query->exists())
+            $this->addError($attr, "そのクライアントは同じ日に別の部屋で指定済みです");
+
+        if ($this->open_flg) {
+            $client = Client::findOne($this->client_id);
+            if ($client->ng_flg)
+                $this->addError($attr, "公開NGクライアントは公開枠に入れられません");
+        }
+
+        return $this->hasErrors($attr);
+    }
+
+    public function validateHoliday($attr, $params)
+    {
+        if($this->isExpired())
+            return true;
+
+        $query = Holiday::find()
+                        ->active()
+                        ->andWhere(['date' => $this->itv_date])
+                        ->andWhere(['or',
+                                    ['homoeopath_id' => null ],
+                                    ['homoeopath_id' => $this->homoeopath_id]]);
+        if($query->exists())
+            $this->addError($attr, "{$this->itv_date}は休業日です");
+
+        return $this->hasErrors($attr);
+    }
+
+    public function validateHomoeopath($attr, $params)
+    {
+        if($this->isExpired())
+            return true;
+
+        if(! $this->itv_time || ! $this->itv_date || ! $this->duration)
+            return false;
+
+        $query = Interview::find()
+               ->andWhere(['between', 'status_id', InterviewStatus::PKEY_READY, InterviewStatus::PKEY_KARUTE_DONE])
+               ->andWhere(['homoeopath_id' => $this->homoeopath_id])
+               ->andWhere(['itv_date'      => $this->itv_date])
+               ->andWhere(['between','itv_time',$this->itv_time,date('H:i',$this->endTime)]);
+
+        if(! $this->isNewRecord)
+             $query->andWhere(['not',['itv_id'=>$this->itv_id]]);
+
+        if($query->exists())
+            $this->addError($attr, "そのホメオパスは同一時刻に別の部屋で指定済みです");
+
+        return $this->hasErrors($attr);
+    }
+
+    public function validateTime($attr, $params)
+    {
+        // 空欄は許可する
+        if ($this->itv_time == '00:00:00')
+            return true;
+
+        if(($product = $this->product) && preg_match('/(途中|メール)/u', $product->name))
+            return true; // メール相談なら何時でもOK
+
+        preg_match('/^([0-9]{1,2}):([0-9]{2}):?.*/', $this->itv_time, $match);
+        $hour = $match[1];
+        $min  = $match[2];
+
+        if(! in_array($hour, range(9, 17)))
+            $this->addError($attr, "'{$hour}' は 9 時から 17 時までではありません");
+
+        if(0 < ($min % 5))
+            $this->addError($attr, "'{$min}' は 5 分刻みではありません");
+
+        if((9 == $hour) && ($min < 30))
+            $this->addError($attr, "開始時刻が早すぎます");
+
+        if((17 == $hour) && (0 < $min))
+            $this->addError($attr, "開始時刻が遅すぎます");
+
+        return $this->hasErrors($attr);
+    }
+
+}
+
+/**
+ * This is the ActiveQuery class for [[Interview]].
+ *
+ * @see Interview
+ */
+class InterviewQuery extends \yii\db\ActiveQuery
+{
+    public function active()
+    {
+        $tbl = Interview::tableName();
+        return $this->andWhere(['<=',"$tbl.status_id",InterviewStatus::PKEY_KARUTE_DONE]);
+    }
+
+    public function vacant()
+    {
+        $tbl = Interview::tableName();
+        return $this->andWhere(["$tbl.status_id" => InterviewStatus::PKEY_VACANT]);
+    }
+
+    public function year($y)
+    {
+        return $this->andWhere(['EXTRACT(YEAR FROM itv_date)' => $y]);
+    }
+
+    public function month($m)
+    {
+        return $this->andWhere(['EXTRACT(MONTH FROM itv_date)' => $m]);
+    }
+
+    /*
+     * @param integer $d [0: Mon, ... 6: Sun]
+    */
+    public function wday($d)
+    {
+        return $this->andWhere(['WEEKDAY(itv_date)' => $d]);
+    }
+
+    /*
+     * @param integer $d range(1, 31)
+    */
+    public function day($d)
+    {
+        return $this->andWhere(['EXTRACT(DAY FROM itv_date)' => $d]);
+    }
+
+    public function future()
+    {
+        return $this->andWhere('itv_date > :today OR (itv_date = :today AND itv_time > :now)',
+                               [
+                                   ':today' => date('Y-m-d'),
+                                   ':now'   => date('H:i'),
+                               ]);
+    }
+
+    public function today($include=true)
+    {
+        if($include)
+            return $this->andWhere(['itv_date' => date('Y-m-d')]);
+
+        return $this->andWhere(['not', ['itv_date' => date('Y-m-d')]]);
+    }
+
+    public function past()
+    {
+        return $this->andWhere('itv_date < :today OR (itv_date = :today AND itv_time < :now)',
+                               [
+                                   ':today' => date('Y-m-d'),
+                                   ':now'   => date('H:i'),
+                               ]);
+    }
+
+    public function afternoon($state = true)
+    {
+        if($state)
+            return $this->andWhere(['>=','itv_time','12:00']);
+        else
+            return $this->andWhere(['<','itv_time','12:00']);
+    }
+}
+
+class InterviewDuplicate extends \yii\base\Behavior
+{
+    protected $model;
+
+    public function events()
+    {
+        return [
+            Interview::EVENT_BEFORE_UPDATE => 'initDuplication',
+            Interview::EVENT_AFTER_UPDATE  => 'saveDuplication',
+        ];
+    }
+
+    /* @brief 相談会がキャンセルされたら同時刻で空き枠を用意する */
+    public function initDuplication($event)
+    {
+        $this->model = null;
+
+        $tgt = $this->owner;
+        if($tgt->status_id != InterviewStatus::PKEY_CANCEL)
+            return;
+
+        $attr = $tgt->getDirtyAttributes();
+        if(! in_array('status_id', array_keys($attr)))
+            return; // status に変更なし
+
+        if($attr['status_id'] == $tgt->getOldAttribute('status_id'))
+            return; // status に変更なし
+
+        $date = $tgt->itv_date . ' ' . $tgt->itv_time;
+        $time = strtotime($date);
+        if($time < time()) // 過去の相談会
+            return;
+
+        $q = Interview::find()
+           ->active()
+           ->andWhere(['not', ['itv_id' => $tgt->itv_id]])
+           ->andWhere([
+               'itv_date'      => $tgt->itv_date,
+               'itv_time'      => $tgt->itv_time,
+               'homoeopath_id' => $tgt->homoeopath_id,
+           ]);
+        if($q->exists())
+            return;
+
+        $model = new Interview();
+        $model->branch_id     = $tgt->branch_id;
+        $model->homoeopath_id = $tgt->homoeopath_id;
+        $model->itv_date      = $tgt->itv_date;
+        $model->itv_time      = $tgt->itv_time;
+        $model->duration      = $tgt->duration;
+        $model->status_id     = InterviewStatus::PKEY_VACANT;
+
+        $this->model = $model;
+    }
+
+    /* @brief 空き枠が用意されていたらINSERTする */
+    public function saveDuplication($event)
+    {
+        if($this->model) {
+            if($this->model->duration == 120) {
+                $date = $this->model->itv_date . ' ' . $this->model->itv_time;
+                $time = strtotime($date);
+                // ６０分ずつに分割する
+                // 前半
+                $this->model->duration = 60;
+
+                // 後半
+                $time2_start = $time + 60*60;
+                $model2 = new Interview();
+                $model2->branch_id     = $this->model->branch_id;
+                $model2->homoeopath_id = $this->model->homoeopath_id;
+                $model2->itv_date      = date('Y-m-d',$time2_start);
+                $model2->itv_time      = date('H:i',$time2_start);
+                $model2->duration      = 60;
+                $model2->status_id     = InterviewStatus::PKEY_VACANT;
+
+
+                $this->model->save(false);
+                                                   
+
+                $model2->save(false);
+
+            } else {
+                $this->model->save(false);
+            }
+        }
+    }
+}

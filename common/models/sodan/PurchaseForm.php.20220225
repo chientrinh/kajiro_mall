@@ -1,0 +1,307 @@
+<?php
+
+namespace common\models\sodan;
+
+use Yii;
+use \common\models\PurchaseDelivery;
+use \common\models\Payment;
+
+/**
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/sodan/PurchaseForm.php $
+ * $Id: PurchaseForm.php 4145 2019-03-29 06:20:34Z kawai $
+ */
+
+class PurchaseForm extends \yii\base\Model
+{
+    /* Interview model */
+    public $interview;
+
+    /* Client model */
+    public $client;
+
+    /* Homoeopath model */
+    public $homoeopath;
+
+    /* Branch model */
+    public $branch;
+
+    /* Product model */
+    public $product;
+
+    /* integer */
+    public $discount = 0;
+
+    /* string */
+    public $note = '';
+
+    /* integer */
+    public $commission = 0;
+    public $manual_commission = 0;
+
+    /* integer */
+    public $company_id = \common\models\Company::PKEY_HE;
+
+    /* \common\models\Purchase model */
+    public $purchase;
+
+    public $payment_id = 0;
+
+    public $discount_rate;
+
+    public function init()
+    {
+        parent::init();
+
+        if($itv = $this->interview)
+        {
+            if(! $this->client)
+                 $this->client = \common\models\Customer::findOne($itv->client_id);
+
+            if(! $this->homoeopath)
+                 $this->homoeopath = \common\models\Customer::findOne($itv->homoeopath_id);
+
+            if(! $this->branch)
+                 $this->branch = $itv->branch ? $itv->branch : null;
+
+            if(! $this->product)
+                 $this->product = $itv->product ? $itv->product : null;
+
+            if (!$this->discount_rate)
+                $this->discount_rate = 40;
+        }
+
+        $this->initPurchase();
+
+        if($this->product)
+            $this->commission = $this->manual_commission && floor($this->purchase->subtotal / 2) != (int)$this->manual_commission ? (int)$this->manual_commission : floor($this->purchase->subtotal / 2) ;
+
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['homoeopath', 'client', 'branch', 'product', 'payment_id'], 'required'],
+            ['discount','integer','min'=>   0 ],
+            ['note',    'string', 'max'=> 255 ],
+            ['manual_commission','integer','min'=>   0 ],
+            [['manual_commission'],'safe']
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'homoeopath'  => 'ホメオパス',
+            'client'      => 'クライアント',
+            'product'     => '相談種別',
+            'discount'    => '割引き',
+            'commission'  => 'ホメオパス報酬',
+            'note'        => '備考',
+            'payment_id'  => '支払い方法'
+        ];
+    }
+
+    public function attributeHints()
+    {
+        return [
+            'discount'   => 'クーポンなど割引がある時に指定します',
+            'commission' => '原則として小計の半額が指定されます',
+        ];
+    }
+
+    public function load($data, $formName = null)
+    {
+        if(! parent::load($data, $formName))
+            return false;
+
+        $this->initPurchase();
+
+        return true;
+    }
+
+    public function save()
+    {
+        if(! $this->validate())
+            return false;
+
+        $transaction = Yii::$app->db->beginTransaction();
+        try
+        {
+            // 売り上げ集計日は相談開催日時にする
+            $this->purchase->create_date = "{$this->interview->itv_date} {$this->interview->itv_time}";
+
+            // チケット使用時処理
+            if (!$this->usedTicket()) {
+                throw new \yii\db\Exception('could not update sodan ticket');
+            }
+
+            if(! $this->purchase->save() || ! $this->createCommission())
+                throw new \yii\db\Exception('could not create purchase or commission');
+
+            if($this->interview && ! $this->updateInterview())
+                throw new \yii\db\Exception('could not update interview');
+
+            // クーポン選択時処理
+            if (!$this->createCouponLog()) {
+                throw new \yii\db\Exception('could not create coupon log');
+            }
+        }
+        catch (\yii\db\Exception $e)
+        {
+            Yii::warning($e->__toString(), $this->className().'::'.__FUNCTION__);
+
+            $transaction->rollBack();
+            return false;
+        }
+        $transaction->commit();
+
+        return true;
+    }
+
+    private function initPurchase()
+    {
+        $client = $this->client;
+        $customer_id = $client->parent ? $client->parent->customer_id : $client->customer_id;
+        $customer = \common\models\Customer::findOne($customer_id);
+
+        $delivery = new PurchaseDelivery();
+        if($customer)
+        {
+            $attrs = ['name01','name02','kana01','kana02','zip01','zip02','pref_id','addr01','addr02','tel01','tel02','tel03'];
+            foreach($attrs as $attr) {
+                $delivery->$attr = $customer->$attr;
+            }
+
+        }
+
+        $paid_status = ($this->payment_id == Payment::PKEY_CASH || $this->payment_id == Payment::PKEY_CREDIT_CARD) ? true : false;
+        $model = new \common\models\PurchaseForm([
+            'scenario'    => \common\models\PurchaseForm::SCENARIO_CREATE,
+            'customer_id' => $customer_id,
+            'branch_id'   => $this->branch->branch_id,
+            'company_id'  => $this->company_id,
+            'items'       => $this->initPurchaseItems(),
+            'discount'    => $this->discount,
+            'payment_id'  => $this->payment_id,
+            'shipped'     => 1,
+            'paid'        => ($paid_status) ? 1 : 0,
+            'status'      => ($paid_status) ? 7 : 1,
+            'note'        => $this->note,
+            'delivery'    => $delivery
+        ]);
+        $model->compute(true);
+        $model->receive = $model->total_charge;
+
+        $this->purchase = $model;
+    }
+
+    private function initPurchaseItems()
+    {
+        if($this->hasErrors())
+            return [];
+
+        $items = [];
+
+
+        $items[] = $this->product;
+
+        // convert Product to PurchaseItem
+        foreach($items as $k => $product)
+        {
+            $items[$k] = new \common\models\PurchaseItem([
+                'purchase_id'=> null,
+                'product_id' => $product->product_id,
+                'quantity'   => 1,
+                'price'      => $product->price,
+                'company_id' => $this->company_id,
+                'code'       => $product->code,
+                'name'       => $product->name,
+            ]);
+            // キャンセルの場合は相談料の一部を請求する（現在は４０％）
+            if(InterviewStatus::PKEY_CANCEL == $this->interview->status_id)
+            {
+                $items[$k]->discount_rate = $this->discount_rate;
+                $items[$k]->price         = $items[$k]->price - floor(($items[$k]->price * $this->discount_rate) / 100);
+                $items[$k]->name          = 'キャンセル料';
+            }
+        }
+
+        return $items;
+    }
+
+    private function createCommission()
+    {
+        $model = new \common\models\Commission([
+            'company_id'  => $this->company_id,
+            'purchase_id' => $this->purchase->purchase_id,
+            'customer_id' => $this->homoeopath->id,
+            'fee'         => $this->commission,
+        ]);
+
+        return $model->save();
+    }
+
+    private function updateInterview()
+    {
+        $model = $this->interview;
+        $model->purchase_id = $this->purchase->purchase_id;
+
+        return (false !== $model->update());
+    }
+
+    private function createCouponLog()
+    {
+        if (!$coupon_id = Yii::$app->request->post('product_id')) {
+            return true;
+        }
+
+        $coupon_log = new \common\models\sodan\ClientCouponLog([
+            'client_id'  => $this->client->customer_id,
+            'product_id' => $coupon_id
+        ]);
+        return $coupon_log->save();
+    }
+
+    /**
+     * 選択したチケットを使用済みにする
+     * @return boolean
+     */
+    private function usedTicket()
+    {
+        if (!$ticket_id = Yii::$app->request->post('ticket_id')) {
+            return true;
+        }
+
+        $ticket = \common\models\DiscountProductLog::findOne($ticket_id);
+        $ticket->use_count -= 1;
+        $ticket->used_flg = ($ticket->use_count > 0) ? 0 : 1;
+
+        $discount_item = new \common\models\PurchaseItem([
+            'purchase_id' => $this->purchase->purchase_id,
+            'quantity'   => 1,
+            'product_id' => $ticket->discountProduct->productDiscount->product_id,
+            'price'      => $ticket->discountProduct->productDiscount->price,
+            'unit_price' => $ticket->discountProduct->productDiscount->price,
+            'unit_tax'   => 0,
+            'company_id' => $this->purchase->company_id,
+            'code'       => $ticket->discountProduct->productDiscount->code,
+            'name'       => $ticket->discountProduct->productDiscount->name,
+            'minus_product' => 1
+        ]);
+        $this->purchase->items[] = $discount_item;
+
+        if ($this->purchase->payment_id == Payment::PKEY_YAMATO_COD) {
+            $this->purchase->postage = 0;
+            $this->purchase->handling = 1000;
+        }
+
+        return $ticket->save();
+    }
+
+}

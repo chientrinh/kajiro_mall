@@ -1,0 +1,158 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "dtb_customer_membership".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/CustomerMembership.php $
+ * $Id: CustomerMembership.php 1527 2015-09-21 12:41:29Z mori $
+ *
+ * @property integer $customer_id
+ * @property integer $membership_id
+ *
+ * @property DtbCustomer $customer
+ * @property MtbMembership $membership
+ */
+class CustomerMembership extends \yii\db\ActiveRecord
+{
+    const DATETIME_MAX      = '3000-00-00 00:00:00';
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'dtb_customer_membership';
+    }
+
+    public function behaviors()
+    {
+        return [
+            [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['start_date'],
+                ],
+                'value' => function ($event) {
+                    return $this->start_date ? $this->start_date : new \yii\db\Expression('NOW()');
+                },
+            ],
+            [
+                'class' => \yii\behaviors\AttributeBehavior::className(),
+                'attributes' => [
+                    \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => ['expire_date'],
+                ],
+                'value' => function ($event) {
+                    return $this->expire_date ? $this->expire_date : self::DATETIME_MAX ;
+                },
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['customer_id', 'membership_id'], 'required'],
+            [['customer_id', 'membership_id'], 'integer'],
+            ['customer_id',  'exist', 'targetClass'=>Customer::className()],
+            ['membership_id','exist', 'targetClass'=>Membership::className()],
+            ['membership_id','unique','targetAttribute'=>['membership_id','customer_id','start_date']],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'label'       => "名称",
+            'start_date'  => "開始",
+            'expire_date' => "終了",
+        ];
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCompany()
+    {
+        return $this->membership->company;
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCustomer()
+    {
+        return $this->hasOne(Customer::className(), ['customer_id' => 'customer_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getMembership()
+    {
+        return $this->hasOne(Membership::className(), ['membership_id' => 'membership_id']);
+    }
+
+    public function getLabel()
+    {
+        return $this->membership->name;
+    }
+
+    public function getName()
+    {
+        return $this->membership->name;
+    }
+
+    public function isExpired()
+    {
+        return (strtotime($this->expire_date) < time());
+    }
+
+    public static function setAsToranokoGenericMember($customer)
+    {
+        return self::setMembership($customer, Membership::PKEY_TORANOKO_GENERIC);
+    }
+
+    public static function setAsToranokoFamilyMember($child, $parent)
+    {
+        if(! self::setMembership($child, Membership::PKEY_TORANOKO_FAMILY))
+            return false;
+
+        $model = new CustomerFamily();
+        $model->parent_id = $parent->customer_id;
+        $model->child_id  = $child->customer_id;
+        return $model->save();
+    }
+
+    public static function setAsToranokoNetworkMember($customer)
+    {
+        return self::setMembership($customer, Membership::PKEY_TORANOKO_NETWORK);
+    }
+
+    private static function setMembership($customer, $target_id)
+    {
+        if($customer->isNewRecord)
+            return false;
+
+        if($customer->memberships)
+            foreach($customer->memberships as $mship)
+                if(($mship->membership_id == $target_id) && (time() < strtotime($mship->expire_date)))
+                    return true;
+
+        $model = new self();
+        $model->customer_id   = $customer->customer_id;
+        $model->membership_id = $target_id;
+
+        return $model->save();
+    }
+
+}

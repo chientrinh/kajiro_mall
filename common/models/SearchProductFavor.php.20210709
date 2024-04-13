@@ -1,0 +1,663 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+use common\models\Category;
+use common\models\Company;
+use common\models\Customer;
+use common\models\Membership;
+use common\models\PurchaseItem;
+use common\models\Branch;
+use common\components\cart\CartItem;
+use common\components\cart\ItemDiscount;
+use common\components\cart\ItemPoint;
+use common\components\cart\NullItemPoint;
+
+use common\models\StaffGrade;
+use common\models\StaffDiscount;
+
+/**
+ * Search Favor: search Discount, Pointing, or something special for customers
+ *
+ * $URL: http://tarax.toyouke.com/svn/MALL/common/models/SearchProductFavor.php $
+ * $Id: SearchProductFavor.php 3659 2017-10-09 11:54:15Z naito $
+ */
+
+class SearchProductFavor extends \yii\base\Model
+{
+    public $branch;
+    public $customer;
+    public $timestamp;
+    public $item;
+    public $agent_id = null; // サポート注文の実行者のID
+    private $_ean13 = null;
+    public $recipe_id = null;
+    
+    // 卸価格計算の対象外とする商品のean13配列
+    private static $exclude_products = array(
+//     		4589572670157,
+//     		4589572670188,
+    );
+
+    public static function getExcludeProducts()
+    {
+    	return self::$exclude_products;
+    }
+    
+
+    public function init()
+    {
+        parent::init();
+
+        if(! $this->timestamp)
+             $this->timestamp = time();
+
+        if (isset($this->item->recipe_id) && $this->item->recipe_id)
+            $this->recipe_id = $this->item->recipe_id;
+
+        // 2018/12/26 スタンダード顧客が適用書を購入する際はスペシャル扱いにする（スペシャル以上は変更なし）
+        if ($this->recipe_id && $this->customer && ($this->customer->grade_id === CustomerGrade::PKEY_AA)) {
+            $this->customer->grade_id = CustomerGrade::PKEY_KA;
+        }
+    }
+
+    public function rules()
+    {
+        return [
+            [['item','timestamp'], 'required'],
+            ['timestamp','integer', 'min' => 1 ],
+            ['branch',  InstanceValidator::className(), 'className' => 
+                \common\models\Branch::className()
+            ],
+            ['customer',InstanceValidator::className(), 'className' => [
+                \common\models\Customer::className(),
+                \common\models\NullCustomer::className(),
+            ]],
+            ['item',    InstanceValidator::className(), 'className' => [
+                \common\components\cart\CartItem::className(),
+                \common\components\cart\ComplexRemedyForm::className(),
+                \common\models\PurchaseItem::className(),
+                \common\models\ProductMaster::className(),
+                \common\models\Product::className(),
+                \common\models\Remedy::className(),
+                \common\models\RemedyStock::className(),
+                \common\models\Vegetable::className(),
+            ]],
+        ];
+    }
+
+    public function afterValidate()
+    {
+        parent::afterValidate();
+
+        if($this->hasErrors())
+            Yii::error(['validation failure', $this->errors], $this->className().'::'.__FUNCTION__);
+    }
+
+    /**
+     * @return ItemDiscount
+     */
+    public function getDiscount()
+    {
+        if($this->hasErrors())
+            return new ItemDiscount();
+
+        // PurchaseItem、CartItemとしてではなく、Product、Remedyなど各Modelに変更してから処理する            
+        if($this->item instanceof PurchaseItem || $this->item instanceof CartItem)
+            $this->item = $this->item->model;
+
+
+        if("VEG" == $this->item->code)
+            return new ItemDiscount();
+
+        if(! $this->customer || ! $this->customer instanceof Customer)
+            return $this->getDiscountForGuest();
+
+        // 外部イベントの時は代理店値引きを取得しない
+        if($this->branch->branch_id == Branch::PKEY_EVENT) {
+            return $this->getDiscountForMember();
+        }
+
+        if((($c = $this->item->category) && ($c->category_id == Category::EVENT_HE))
+            // HEイベントは代理店商品から除外する
+            ||
+           ((! $this->customer->isAgencyOf($this->item->company->company_id)) || $this->agent_id)
+        )
+            return $this->getDiscountForMember();
+
+        // 社員割引処理
+        if($this->customer->isStaff())
+            return $this->getDiscountForStaff();
+
+        // 代理店割引処理
+        return $this->getDiscountForAgency();
+    }
+
+    /**
+     * 社員割引
+     * 2020/07/29現在は値引きは想定しない kawai
+     */
+    public function getDiscountForStaff()
+    {
+     /*
+        $offer = $this->getOfferRate();
+        if(isset($offer) && $offer['discount'] == 101)
+            return new ItemDiscount(['rate' => 0]);
+        
+        
+        if(Company::PKEY_HJ == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHJRate($this->item, $this->customer)]);
+
+        if(Company::PKEY_HP == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHPRate($this->item)]);
+
+        if(Company::PKEY_HE == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHERate($this->item)]);
+        */
+        return new ItemDiscount(['rate' => 0]);      
+    }
+
+
+    public function getDiscountForAgency()
+    {
+        /**
+
+        todo: $this->itemの中身（なんのクラスのインスタンスか）を確認
+
+        if(! $rating = $this->customer->getAgencyRating($this->customer, $this->item))
+            return 0;
+
+        return new ItemDiscount(['rate' => $rating->discount_rate]);
+
+        */
+        $offer = $this->getOfferRate();
+        if(isset($offer) && $offer['discount'] == 101)
+            return new ItemDiscount(['rate' => 0]);
+        
+        
+        if(Company::PKEY_HJ == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHJRate($this->item, $this->customer)]);
+
+        if(Company::PKEY_HP == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHPRate($this->item)]);
+
+        if(Company::PKEY_HE == $this->item->company->company_id)
+            return new ItemDiscount(['rate' => static::getHERate($this->item)]);
+
+        return new ItemDiscount(['rate' => 0]);      
+    }
+
+    public function getOfferRate()
+    {
+        $customer = $this->customer;
+        $point_rate     = 0;
+        $discount_rate = 0;
+
+
+        // PurchaseItem、CartItemとしてではなく、Product、Remedyなど各Modelに変更してから処理する
+        if($this->item instanceof PurchaseItem || $this->item instanceof CartItem)
+            $this->item = $this->item->model;
+
+        if("VEG" == $this->item->code)
+            return array('point' => $point_rate,
+                         'discount' => $discount_rate,
+                        );
+
+        if($cat = $this->item->category)
+        {
+            $q = Offer::find()->where(['category_id'=>$cat->category_id]);
+            if($customer)
+                $q->andWhere(['grade_id'=> isset(Yii::$app->user->identity->grade_id) ? Yii::$app->user->identity->grade_id : $this->customer ? $this->customer->grade_id : null]);
+
+            $point_rate = $q->max('point_rate');
+            $discount_rate = $q->max('discount_rate');
+        }
+        if($this->item->category->isEvent())
+            ; // do something?
+        if(! $this->getEan13())
+            return array('point' => $point_rate,
+                         'discount' => $discount_rate,
+                        );
+
+        $barcode = $this->getEan13();
+
+        $query = \common\models\OfferSeasonal::find()
+               ->where(['ean13' => $barcode])
+               ->andWhere('start_date <= NOW()')
+               ->andWhere('end_date   >= NOW()')
+               ->andWhere(['OR',
+                   ['grade_id' => null],
+                   ['=','grade_id',  isset(Yii::$app->user->identity->grade_id) ? Yii::$app->user->identity->grade_id : $this->customer ? $this->customer->grade_id : null]
+               ]);
+        if($this->branch)
+            $query->andWhere(['OR',
+                ['branch_id' => null],
+                ['branch_id' => $this->branch->branch_id]
+            ]);
+        else
+            $query->andWhere(['branch_id' => null]);
+
+        $point_rate = max($point_rate, $query->max('point_rate'));
+        $discount_rate = max($discount_rate, $query->max('discount_rate'));
+
+            return array('point' => $point_rate,
+                         'discount' => $discount_rate,
+                        );
+    }
+
+    private function getDiscountForGuest()
+    {
+        $rate  = 0;
+        if(! $this->getEan13())
+            return new ItemDiscount();
+
+        $query = \common\models\OfferSeasonal::find()
+               ->where(['ean13' => $this->ean13])
+               ->andWhere('start_date <= NOW()')
+               ->andWhere('end_date   >= NOW()')
+               ->andWhere(['OR',
+                   ['grade_id' => null],
+               ]);
+
+        if($this->branch)
+            $query->andWhere(['OR',
+                ['branch_id' => null],
+                ['branch_id' => $this->branch->branch_id]
+            ]);
+        else
+            $query->andWhere(['branch_id' => null]);
+
+        if($query->max('discount_rate'))
+            $rate = $query->max('discount_rate');
+
+        return new ItemDiscount([
+            'rate' => $rate,
+        ]);
+    }
+
+    public function getDiscountForMember()
+    {
+        $customer = $this->customer;
+        $rate = 0;
+
+        if($cat = $this->item->category)
+        {
+            $q = Offer::find()->where(['category_id'=>$cat->category_id]);
+
+            if($customer)
+                $q->andFilterWhere(['grade_id'=>$customer->grade_id]);
+
+            $rate = $q->max('discount_rate');
+        }
+        if(! $this->getEan13())
+            return new ItemDiscount([
+                'rate' => $rate,
+            ]);
+
+        $query = \common\models\OfferSeasonal::find()
+               ->where(['ean13' => $this->ean13])
+               ->andWhere('start_date <= NOW()')
+               ->andWhere('end_date   >= NOW()');
+
+        if($customer)
+            $query->andWhere(['OR',
+                              ['=', 'grade_id', $customer->grade_id],
+                              ['grade_id' => null],
+            ]);
+        else
+            $query->andWhere(['grade_id' => null]);
+
+        if($this->branch)
+            $query->andWhere(['OR',
+                ['branch_id' => null],
+                ['branch_id' => $this->branch->branch_id]
+            ]);
+        else
+            $query->andWhere(['branch_id' => null]);
+
+
+        if($query->max('discount_rate'))
+            $rate = max($rate, $query->max('discount_rate'));
+//        $rate = max($rate, $query->max('discount_rate'));
+        
+        return new ItemDiscount([
+            'rate' => $rate,
+        ]);
+    }
+
+    /**
+     * 卸割引率の取得を行なう。取得できなければ0を返す
+     * @return int
+     **/
+    public function getWholesale()
+    {
+        if($this->hasErrors())
+            return 0;
+            
+        if($this->item instanceof PurchaseItem || $this->item instanceof CartItem)
+            $this->item = $this->item->model;
+
+        if(! $this->customer || ! $this->customer instanceof Customer)
+            return 0;
+
+        if((($c = $this->item->category) && ($c->category_id == Category::EVENT_HE))
+            // HEイベントは代理店商品から除外する
+            ||
+           ((! $this->customer->isAgencyOf($this->item->company->company_id)))
+        )
+            return 0;
+
+        // 代理店割引処理
+        $rate = $this->getDiscountForAgency();
+        if(isset($rate->rate) && 0 != $rate->rate)
+            return 1;
+
+        return 0;
+
+    }
+
+    public function getEan13()
+    {
+//        if(isset($this->_ean13))
+//            return $this->_ean13;
+        $this->_ean13 = $this->item->canGetProperty('ean13') ? $this->item->ean13 : false;
+
+        if(! $this->_ean13)
+             $this->_ean13 = ($this->item->canGetProperty('jancode') && $this->item->jancode) ? $this->item->jancode->jan : false;
+
+        if(! $this->_ean13)
+             $this->_ean13 = $this->item->canGetProperty('barcode') ? $this->item->barcode : false;
+
+        if(! $this->_ean13)
+             $this->_ean13 = $this->item->canGetProperty('code') ? $this->item->code : false;
+        return $this->_ean13;
+    }
+
+    /**
+     * @return ItemPoint
+     */
+    public function getPoint()
+    {
+        if($this->hasErrors())
+            return new NullItemPoint();
+
+        if(! $this->customer)
+            return new NullItemPoint();
+
+        // PurchaseItem、CartItemとしてではなく、Product、Remedyなど各Modelに変更してから処理する
+        if($this->item instanceof PurchaseItem || $this->item instanceof CartItem)
+            $this->item = $this->item->model;
+
+        // 外部イベントのときは代理店値引きでなくポイント付与
+        if(($this->branch->branch_id != Branch::PKEY_EVENT && $this->customer->isAgencyOf($this->item->company->company_id) && 0 != $this->getDiscount()->rate) || "VEG" == $this->item->code)
+            return new NullItemPoint();
+
+        $member_point = $this->getPointForMember();
+        // 社員なら社員割引（指定率のポイント付与） // 独自仕入れ品はOfferで０となっており、別途category_id = 18 で判定する
+        if($this->customer->isStaff() && (($member_point['rate'] != 0 && $member_point['rate'] != 101) || $this->item->category_id == 18))
+            return $this->getPointForStaff();
+
+        return $member_point;            
+    }
+
+    public function getPointForMember()
+    {
+        $customer = $this->customer;
+        $rate     = 0;
+
+        if($cat = $this->item->category)
+        {
+            $q = Offer::find()->where(['category_id'=>$cat->category_id]);
+            if($customer)
+                $q->andWhere(['grade_id'=>$customer->grade_id]);
+
+            $rate = $q->max('point_rate');
+        }
+
+        if($this->item->category->isEvent()){}
+
+        if(! $this->getEan13())
+            return new ItemPoint([
+                'rate' => $rate,
+            ]);
+
+        $barcode = $this->getEan13();
+        if($this->customer) {
+            $query = \common\models\OfferSeasonal::find()
+                ->where(['ean13' => $barcode])
+                ->andWhere('start_date <= NOW()')
+                ->andWhere('end_date   >= NOW()')
+                ->andWhere(['OR',
+                    ['grade_id' => null],
+                    ['=','grade_id',$this->customer->grade_id]
+                ]);
+        } else {
+            $query = \common\models\OfferSeasonal::find()
+               ->where(['ean13' => $barcode])
+               ->andWhere('start_date <= NOW()')
+               ->andWhere('end_date   >= NOW()')
+               ->andWhere(['grade_id' => null]
+               );
+        }
+        if($this->branch)
+            $query->andWhere(['OR',
+                ['branch_id' => null],
+                ['branch_id' => $this->branch->branch_id]
+            ]);
+        else
+            $query->andWhere(['branch_id' => null]);
+
+        if($query->max('point_rate'))
+            $rate = $query->max('point_rate');
+//        $rate = max($rate, $query->max('point_rate'));
+        return new ItemPoint([
+            'rate' => $rate,
+        ]);
+    }
+
+    /**
+     * 社員割引（指定率のポイント付与）
+     * CustomerMemberShipからStaffGradeー＞StaffDiscount->point_rateを取得して返す
+     */
+    public function getPointForStaff()
+    {
+        $customer = $this->customer;
+        $rate     = 0;
+
+        if($cat = $this->item->category)
+        {
+            $staff_grade_id = null;
+
+            foreach($customer->memberships as $membership)
+            {
+
+                if($staff_grade_id = Membership::getStaffGrade($membership->membership_id))
+                    break;                
+    
+            }
+
+            $q = StaffDiscount::find()->where(['category_id'=>$cat->category_id]);
+            $q->andWhere(['staff_grade_id'=>$staff_grade_id]);
+
+            $rate = $q->max('point_rate');
+        }
+
+        if($this->item->category->isEvent()){}
+
+        return new ItemPoint([
+            'rate' => $rate,
+        ]);
+    }        
+
+    private function getHJRate($product, $customer)
+    {
+
+    	// 契約がHJ販売店の代理店Aに属していない場合
+    	if(! $customer->isMemberOf(Membership::PKEY_AGENCY_HJ_A))
+    		return 0;
+    
+    	// 対象外サブカテゴリに属する場合
+    	$query =  \common\models\ProductSubcategory::find()
+    	            ->andWhere(['subcategory_id' => Subcategory::PKEY_HJ_AGENCY_EXCLUDE,
+    			            'ean13'          => $this->ean13 ]);
+    
+        if ($query->exists()) return 0;
+
+        // 対象外指定商品の場合
+        if(in_array($this->ean13, $this->getExcludeProducts())) return 0;
+
+        // ランク割引率が設定されていれば優先する
+        $agency_rank = $customer->activeAgencyRank;
+
+        // 商品が酒類である場合
+        if($product->isLiquor())
+        {
+            // 仮想店舗(フロント)、熱海、六本松以外は無条件で卸対象外＝> rate = 0 とする
+            if(!in_array($this->branch->branch_id,[Branch::PKEY_ROPPONMATSU,Branch::PKEY_ATAMI,0]) && Company::PKEY_HJ != $this->branch->company->company_id)
+                return 0;
+
+            // 酒販売免許所持の場合
+            if($customer->hasLiquorLicense()) {
+                if ($agency_rank) {
+                    // 割引率詳細が設定されているかチェック
+                    $rate = $this->checkAgencyRankDetail($agency_rank->rank_id, $product);
+                    if($rate > 0)
+                        return $rate;
+
+                    return $agency_rank->rank->liquor_rate;
+                }
+                return 40;
+            }
+            // 免許なしの場合
+            return 0;
+        }
+
+        // レメディー（大瓶・小瓶）の場合
+        elseif($product->isRemedy()) {
+            if ($agency_rank) {
+                // 割引率詳細が設定されているかチェック
+                $rate = $this->checkAgencyRankDetail($agency_rank->rank_id, $product);
+                if($rate > 0)
+                    return $rate;
+
+                return $agency_rank->rank->remedy_rate;
+            }
+            return 35;
+        }
+
+        // レメディー雑貨の場合
+        // @TODO RemedyStockとProductMasterとProductにisRemedyVarietyメソッドを実装する
+        elseif($product->isRemedyVariety()) {
+            if ($agency_rank) {
+                // 割引率詳細が設定されているかチェック
+                $rate = $this->checkAgencyRankDetail($agency_rank->rank_id, $product);
+                if($rate > 0)
+                    return $rate;
+
+                return $agency_rank->rank->goods_rate;
+            }
+            return 30;
+        }
+
+        // それ以外
+        if ($agency_rank) {
+            // 割引率詳細が設定されているかチェック
+            $rate = $this->checkAgencyRankDetail($agency_rank->rank_id, $product);
+            if($rate > 0)
+                return $rate;
+
+            return $agency_rank->rank->other_rate;
+        }
+        return 0;
+    }
+
+    private function checkAgencyRankDetail($rank_id, $product)
+    {
+        // Objectがオリジナルレメディーなら無条件でゼロを返す 2020/04/06 : kawai
+        if($product instanceof \common\components\cart\ComplexRemedyForm)
+            return 0;
+
+        $product_query =  \common\models\AgencyRankDetail::find()->where(['rank_id' => $rank_id])->andWhere(['sku_id' => $product->sku_id])->one();
+        if($product_query)
+            return (int)$product_query->discount_rate;
+
+        // Productに紐付いたサブカテゴリID
+        $subcategory_ids = yii\helpers\ArrayHelper::getColumn($product->getSubcategories()->andWhere(['not',['parent_id' => null]])->all(), 'subcategory_id');
+        $subcategory_query1 = \common\models\AgencyRankDetail::find()->where(['rank_id' => $rank_id])->andWhere(['in', 'subcategory_id', $subcategory_ids])->orderBy('discount_rate DESC')->one();
+        if($subcategory_query1)
+            return (int)$subcategory_query1->discount_rate;
+
+        // 同親サブカテゴリID
+        $subcategory_parents = yii\helpers\ArrayHelper::getColumn($product->getSubcategories()->all(), 'parent_id');
+        $subcategory_query2 = \common\models\AgencyRankDetail::find()->where(['rank_id' => $rank_id])->andWhere(['in', 'subcategory_id', $subcategory_parents])->orderBy('discount_rate DESC')->one();
+        if($subcategory_query2)
+            return (int)$subcategory_query2->discount_rate;
+
+        return 0;
+    }
+
+    private function getHPRate($product)
+    {
+    
+    	// 対象外サブカテゴリに属する場合
+    	$query =  \common\models\ProductSubcategory::find()
+    	->andWhere(['subcategory_id' => Subcategory::PKEY_HP_AGENCY_EXCLUDE,
+    			'ean13'          => $this->ean13 ]);
+    
+    	if ($query->exists()) return 0;
+    
+    
+    	// 対象外指定商品の場合
+    	if(in_array($this->ean13, $this->getExcludeProducts())) return 0;
+    
+    
+    
+    	// 「他社本」サブカテゴリに属する場合
+        $query =  \common\models\ProductSubcategory::find()
+    	      ->andWhere(['subcategory_id' => Subcategory::PKEY_HP_OTHER_PUBLISHER,
+    	      		'ean13' => $this->ean13 ]);
+    
+        if ($query->exists()) return 0;
+    
+        return 30;
+    }
+
+    private function getHERate($product)
+    {
+
+        //  商品が「生野菜」である場合（Vegは全て「生野菜」となる）
+        if("VEG" == $product->code) 
+            return 0;
+
+        // 卸売対象のカテゴリに属していない場合
+        if(!in_array($product->category->category_id, [Category::FOOD, Category::COSMETIC, Category::GOODS]))
+            return 0;
+
+
+    	// 対象外サブカテゴリに属する場合
+    	$query =  \common\models\ProductSubcategory::find()
+    	->andWhere(['subcategory_id' => Subcategory::PKEY_HE_AGENCY_EXCLUDE,
+    			'ean13'          => $this->ean13 ]);
+
+    	if ($query->exists()) return 0;
+    
+    
+    	// 対象外指定商品の場合
+    	if(in_array($this->ean13, $this->getExcludeProducts())) return 0;
+    
+    
+    	if(! $rating = $this->customer->getAgencyRating($this->item->company->company_id))
+    		return 20;
+    
+    		return $rating->discount_rate;
+    }
+
+    public function load($data, $formName)
+    {
+        $this->_ean13 = null;
+
+        return parent::load($data, $formName);
+    }
+
+}

@@ -1,0 +1,85 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "mtb_staff_discount".
+ *
+ * @link    $URL: https://tarax.toyouke.com/svn/MALL/common/models/StaffDiscount.php $
+ * @version $Id: StaffDiscount.php 2722 2020-07-29 08:38:22Z kawai $
+ *
+ * @property integer $category_id
+ * @property integer $staff_grade_id
+ * @property integer $discount_rate
+ * @property integer $point_rate
+ *
+ * @property MtbStaffGrade $grade
+ * @property MtbCategory $category
+ */
+class StaffDiscount extends \yii\db\ActiveRecord
+{
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'mtb_staff_discount';
+    }
+
+    public function behaviors()
+    {
+        return [
+            'log' => [
+                'class'  => ChangeLogger::className(),
+                'owner'  => $this,
+                'user'   => Yii::$app->has('user') ? Yii::$app->user : null,
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['category_id', 'staff_grade_id'], 'required'],
+            [['category_id', 'staff_grade_id', 'discount_rate', 'point_rate'], 'integer'],
+            [['discount_rate','point_rate'],'integer','min'=>0,'max'=>100],
+            [['category_id',],'exist', 'targetClass'=>\common\models\Category::className()],
+            [['staff_grade_id',   ],'exist', 'targetClass'=>\common\models\StaffGrade::className()],
+            [['category_id', 'staff_grade_id'], 'unique', 'targetAttribute' => ['category_id', 'staff_grade_id'], 'message' => 'The combination of Category ID and StaffGrade ID has already been taken.']
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'category_id'   => 'カテゴリー',
+            'staff_grade_id'      => '社員区分',
+            'discount_rate' => '値引き率',
+            'point_rate'    => 'ポイント率',
+        ];
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getStaffGrade()
+    {
+        return $this->hasOne(StaffGrade::className(), ['staff_grade_id' => 'staff_grade_id']);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getCategory()
+    {
+        return $this->hasOne(Category::className(), ['category_id' => 'category_id']);
+    }
+}

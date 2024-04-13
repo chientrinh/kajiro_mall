@@ -1,0 +1,430 @@
+<?php
+namespace common\models;
+
+use Yii;
+
+/**
+ * Signup form
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/DeliveryDateTimeForm.php $
+ * $Id: DeliveryDateTimeForm.php 4236 2020-03-11 08:45:58Z mori $
+ * 2020-03-08 haisou kikan wo zurasu kinou     sakai $
+ */
+
+class DeliveryDateTimeForm extends \yii\base\Model
+{
+    const SCENARIO_TY = 'ty';
+
+    public $date;
+    public $time_id;
+    public $zip01;
+    public $zip02;
+    public $pref_id;
+    public $company_id  = 0;
+    public $now;
+    private $_zipModel  = null;
+    private $_timeModel = null;
+
+    public $osechi_date;
+
+    /* @inheritdoc */
+    public function __construct( $config = [] )
+    {
+        parent::__construct($config);
+    }
+
+    /* @inheritdoc */
+    public function init()
+    {
+        parent::init();
+
+        $this->_zipModel  = new Zip();
+        $this->_timeModel = new DeliveryTime();
+
+        if($this->company_id == Company::PKEY_TY) {
+           if($this->osechi_date) {
+               $this->scenario = "osechi";
+           } else {
+               $this->scenario = self::SCENARIO_TY;
+           }
+        }
+        $this->validate('now'); // i want to set default value of($this->now)
+    }
+
+    /* @inheritdoc */
+    public function rules()
+    {
+        return [
+            [['now'], 'default', 'value'=>function($model,$attribute){
+                if(in_array(date('D'),['Wed','Thu'])) {
+                    return $this->checkHoliday(strtotime('+1 week Thursday')+18*60*60);
+                } else if(in_array(date('D'),['Fri','Sat'])) {
+                    return $this->checkHoliday(strtotime('next Thursday')+18*60*60);
+                }
+                return $this->checkHoliday(strtotime('this Thursday')+18*60*60);/*六本松は木曜夕刻に出荷する*/
+            }, 'on'=>self::SCENARIO_TY],
+            [['now'], 'default', 'value'=>function($model,$attribute){ return $this->checkHoliday(time()); }],
+            [['zip01','zip02','pref_id'], 'required'],
+            [['date','time_id'], 'filter', 'filter'=>function($value){ if(0 == $value) return null; else return $value; }],
+            [['date','time_id'], 'required', 'skipOnEmpty' => true],
+            ['pref_id', 'exist', 'targetClass' => '\common\models\Pref', 'targetAttribute' => 'pref_id'],
+            ['time_id', 'exist', 'targetClass' => '\common\models\DeliveryTime', 'targetAttribute' => 'time_id', 'skipOnEmpty'=> true ],
+            ['date',    'date',  'format'=>'yyyy-MM-dd'],
+            [['zip01','zip02'], 'integer'],
+            ['zip01', 'string', 'length' => 3],
+            ['zip02', 'string', 'length' => 4],
+            ['date', 'validateDate', 'skipOnError' => true, 'skipOnEmpty' => true],
+            ['time_id', 'validateTime', 'skipOnError' => false, 'skipOnEmpty' => true],
+            [['zip01','zip02','pref_id','time_id','date'], 'safe'],
+        ];
+    }
+
+    /* @inheritdoc */
+    public function scenarios()
+    {
+        return \yii\helpers\ArrayHelper::merge(parent::scenarios(),[
+            self::SCENARIO_TY => self::attributes(),
+        ]);
+    }
+
+    /* @inheritdoc */
+    public function attributeLabels()
+    {
+        return [
+            'date'    => "希望日",
+            'time_id' => "時間帯",
+        ];
+    }
+
+    public function checkHoliday($now)
+    {
+        $now_date = date('Y-m-d', $now);
+        // 六本松の場合、年末年始休業期間なら発送予定日を再セットする
+        if(self::SCENARIO_TY == $this->scenario) {
+            if(strtotime('2022-12-21') <= time() && strtotime('2022-12-27') > time()) {
+                $now_date = '2022-12-28 18:00:00';
+            } else if(strtotime('2022-12-27') <= time() && strtotime('2023-01-04') > time()) {
+                $now_date = '2023-01-05 18:00:00';
+            } else if(strtotime('2023-01-04') <= time() && strtotime('2023-01-10') > time()) {
+                $now_date = '2023-01-12 18:00:00';
+            // } else if(strtotime('2022-03-29 00:00:00') > time()) {
+            //     // 2022/03/28 23:59:59 までは従来どおり
+            //     $now_date = '2022-03-30 18:00:00';
+            // } else if(strtotime('2022-03-29 00:00:00') <= time() && strtotime('2022-04-06 00:00:00') > time()) {
+            //     // 2022/03/29 〜 2022/04/05 は特別対応
+            //     $now_date = '2022-04-07 18:00:00';                
+            } else {
+                return $now;
+            }
+
+        // それ以外（熱海）の場合は現在時刻1/5に再セット
+        } else {
+            // if(strtotime('2021-12-30') <= time() && strtotime('2022-01-05') > time()) {
+            //     $now_date = '2022-01-05 09:00';
+            // } else {
+                return $now;
+            // }
+        }
+
+        return strtotime($now_date);
+       
+    }
+
+    public function getDateCandidates($include_frozen = false, $purchase_date = null)
+    {
+        if(isset($this->osechi_date))
+            $this->now = $this->osechi_date;
+
+        if(!$purchase_date)
+            $purchase_date = $this->now;
+            
+        // ticket:677　
+        $days  = $this->zipModel->getDays($this->scenario, $purchase_date);
+        $_24h  = 60 * 60 * 24;
+        $start = $this->zipModel->getMinDelivTimeStampYamato($purchase_date);
+
+        $yamato_22 = $this->zipModel->yamato_22;
+        if(($purchase_date && $purchase_date < strtotime('2021-04-30 00:00:00')) || time() < strtotime('2021-04-30 00:00:00')) {
+            if($this->zipModel->pref_id == 2 || $this->zipModel->pref_id == 5) {
+                $yamato_22 = \common\models\Zip::DELEVERY_15; // 青森・秋田は self::DELIVERY_15扱い
+            }
+        }
+        
+
+        if(self::SCENARIO_TY != $this->scenario) {
+            // #375 臨時休業対応
+            if($this->now > strtotime('2019-12-19 12:00:00') && strtotime('2019-12-20 12:00:00') > $this->now) {
+                $min_deliv_days = strtotime(date('Y-m-d',$start)) - strtotime(date('Y-m-d',$this->now))/$_24h;
+                $data = $this->zipModel->yamato_22; // 佐川が実装されたらここを変更しないといけない。ヤマト決め打ち 2019/10/28
+                $min_deliv_days = floor($data / 10);
+                // 臨時休業など特定の条件では未適用とする
+                   if(strtotime(date('Y-m-d',time())) + $min_deliv_days * $_24h < strtotime('2019-12-24')) {
+                       $start = strtotime('2019-12-23') + $min_deliv_days * $_24h;
+                   } else {
+                       $start = $this->now + $min_deliv_days * $_24h;
+                   }
+
+            }
+
+            // TODO: #377 2019年末年始対応 #426 2020年末年始対応
+            if($this->now >= strtotime('2020-12-29 12:00:00') && strtotime('2021-01-05 12:00:00') > $this->now) {
+                $min_deliv_days = strtotime(date('Y-m-d',$start)) - strtotime(date('Y-m-d',$this->now))/$_24h;
+                $data = $this->zipModel->yamato_22; // 佐川が実装されたらここを変更しないといけない。ヤマト決め打ち 2019/10/28
+                $min_deliv_days = floor($data / 10);
+                // 臨時休業など特定の条件では未適用とする
+               if(strtotime(date('Y-m-d',time())) < strtotime('2019-12-28')) {
+                   // 2019-12-27いっぱいまでは最短で２９日（＋１日）
+                   $start = strtotime('2019-12-28') + $min_deliv_days * $_24h;
+               } else {
+                   $start = strtotime('2021-01-05') + $min_deliv_days * $_24h;
+               }
+            }
+
+
+        }
+        // 臨時休業対応終わり
+
+        $max   = $this->now + ($days * $_24h); // ヤマトB2上限は today + 1 week
+        $max   = strtotime(date('Y-m-d 23:59:59', $max));
+        $candidates = [];
+        $referer = getenv('HTTP_REFERER');
+        if(preg_match("/bovista/",getenv('HTTP_REFERER'))){
+          $query = \common\models\Customer::findone(['customer_id'=>29837,]);
+        }
+        else{
+          $query = \common\models\Customer::findone(['customer_id'=>32458,]);
+        }
+        $delayDate = $query->zip01;
+        $max = $start + ($delayDate - 1) * $_24h + ($query->zip02) * $_24h;
+        foreach(range(0+$delayDate, $days+$delayDate) as $day)
+        {
+            $sec = ($start + $day * $_24h);
+            $key = date('Y-m-d', $sec);
+
+            if($max < $sec)
+                break;
+
+            // 年末年始対応 1月1日を除外する
+            if(self::SCENARIO_TY == $this->scenario && date('m-d',$sec) == '01-01') {
+                break;
+            }
+
+            $candidates[$key] = Yii::$app->formatter->asDate($sec, 'php:Y年m月d日 (D)');
+        }
+
+        // 冷凍品が含まれる場合、従来の計算を行う
+        // 土曜（翌々日地域は日曜まで）
+        if($include_frozen) {
+            $max   = $this->now + ($days * $_24h); // ヤマトB2上限は today + 1 week
+            $max   = strtotime(date('Y-m-d 23:59:59', $max));
+            $candidates = [];
+            foreach(range(0, $days) as $day)
+            {
+                $sec = ($start + $day * $_24h);
+                $key = date('Y-m-d', $sec);
+
+                if($max < $sec)
+                    break;
+
+                // 年末年始対応 1月1日を除外する
+                if(self::SCENARIO_TY == $this->scenario && date('m-d',$sec) == '01-01') {
+                    break;
+                }  
+
+                $candidates[$key] = Yii::$app->formatter->asDate($sec, 'php:Y年m月d日 (D)');
+            }
+        }
+
+        if($yamato_22 % 10)
+        {
+            $key_0 = array_shift(array_keys($candidates));
+            $candidates[$key_0] .= ' 14時以降';
+        }
+
+        return $candidates;
+    }
+
+    protected function getTimeModel()
+    {
+        if(isset($this->_timeModel) && ($this->_timeModel->time_id == $this->time_id))
+            return $this->_timeModel;
+
+        $this->_timeModel = \common\models\DeliveryTime::findOne($this->time_id);
+
+        return $this->_timeModel;
+    }
+
+    /**
+     * 臨時休業日のお知らせを返す
+     * @return string
+     **/
+    public function getHolidayMessage()
+    {
+        if(self::SCENARIO_TY == $this->scenario) {
+            $html = '<div class="col-md-12" style="margin-bottom:10px">
+                <div class="alert alert-warning">
+                    <font color="black">
+                    <h5><i class="glyphicon glyphicon-info-sign"></i><strong>年末年始のお知らせ（函南物流センター）</strong></h5>
+                    <p>函南物流センターの年末年始の出荷につきまして、下記のとおりとさせていただきます。<br />
+皆様には大変ご迷惑おかけいたしますが、ご了承いただきますようお願い申し上げます。<br /><br />
+<strong>■年内最終出荷</strong><br />
+・野菜セット<br />
+<font color="red">2022年12月22日(木)</font>　※12/20締め切り<br />
+・その他加工品<br />
+<font color="red">2022年12月28日(水)</font>　※12/26締め切り<br />
+■年始初回出荷<br />
+・野菜セット<br />
+<font color="red">2023年1月12日(木)</font>　※1/10締め切り<br />
+・その他加工品<br />
+<font color="red">2023年1月5日(木)</font>　※1/3締め切り<br />
+</p>
+                    </font>
+                </div>
+            </div>';
+        } else {
+// 熱海
+            $html = '<div class="col-md-12" style="margin-bottom:10px">
+                <div class="alert alert-warning">
+                    <font color="black">
+                    <h5><i class="glyphicon glyphicon-info-sign"></i><strong>年末年始のお知らせ（熱海物流センター）</strong></h5>
+                    <p>熱海物流センターの年末年始の休業につきまして、下記のとおりとさせていただきます。<br />
+皆様には大変ご迷惑おかけいたしますが、ご了承いただきますようお願い申し上げます。<br /><br />
+<strong>■年末年始休業日</strong><br />
+<font color="red">2022年12月30日(金)〜2023年1月4日(水)</font>
+</p>
+                    </font>
+                </div>
+            </div>';
+        }
+        return $html;
+    }
+
+    /* @return string */
+    public function getToCustomerMessage()
+    {
+        if(self::SCENARIO_TY == $this->scenario) {
+            $now = time();
+            // if($now > strtotime('2021-12-16') && strtotime('2021-12-27') > $now) {
+            if($this->now >= strtotime('2022-12-22') && strtotime('2023-01-04') > time())
+                return sprintf("年末最終出荷日は、野菜セット：<strong>2022年12月22日 (木)</strong>、加工品：<strong>2022年12月28日 (水)</strong>。<br />
+                年始初回出荷日は、野菜セット：<strong>2023年01月12日 (木)</strong>、加工品：<strong>2023年01月05日 (木)</strong>。<br />");
+
+                // return sprintf("年末最終出荷日は、野菜セット：<font color='red'><strong>2021年12月22日 (水)</strong></font>、加工品：<font color='red'><strong>2021年12月27日 (月)</strong></font>。<br />
+                // 年始初回出荷日は、野菜セット：<font color='red'><strong>2022年01月12日 (水)</strong></font>、加工品：<font color='red'><strong>2022年01月05日 (水)</strong></font>。<br />");
+            // } else if($now >= strtotime('2021-12-27') && strtotime('2022-01-10') > $now) {
+            //     return sprintf("年始初回出荷日は、野菜セット：<font color='red'><strong>2022年01月12日 (水)</strong></font>、加工品：<font color='red'><strong>2022年01月05日 (水)</strong></font>。<br />");
+            // }
+            return sprintf("豊受自然農の商品は、六本松発送所から<strong>クール便にて</strong>毎週木曜日に発送しています (水〜土曜のご注文は翌週の木曜日に発送)。<br>いまご注文いただいた場合、発送予定日は<strong> %s </strong>です。ご指定がなければ最短でお届けします。", Yii::$app->formatter->asDate($this->now, 'php:Y年m月d日 (D)'));
+
+        }
+        return ""; //"月〜金曜日の午前中までのご注文は当日発送、土曜・日曜や正午以降は翌営業日に発送します。北海道、佐賀県、長崎県、大分県、熊本県、宮崎県、鹿児島県、沖縄県へは発送の翌々日到着、その他都府県へは発送の翌日に到着予定です。";
+    }
+
+    /**
+     *  おせち専用のメッセージを返す
+     *  @return string
+     **/
+    public function getToOsechiCustomerMessage()
+    {
+        return sprintf("この限定商品は、熱海物流センターより発送しています。<br>いまご注文いただいた場合、発送予定日は<strong> 2017年12月28日 </strong>です。最短でお届けします。");
+    }
+
+    protected function getZipCode()
+    {
+        return sprintf('%s%s', $this->zip01, $this->zip02);
+    }
+
+    protected function getZipModel()
+    {
+        if(isset($this->_zipModel) && ($this->_zipModel->zipcode == $this->zipcode))
+            return $this->_zipModel;
+
+        if(! $zip = \common\models\Zip::find()->where(['zipcode'=> $this->zipcode])->one())
+             $zip = new \common\models\Zip();
+
+        $this->_zipModel = $zip;
+
+        return $this->_zipModel;
+    }
+
+    /* @return bool */
+    public function load($data, $formName = null)
+    {
+        if(! parent::load($data, $formName))
+            return false;
+
+        return true;
+    }
+
+    public function validateDate($attribute, $params)
+    {
+        $days     = $this->zipModel->getDays($this->scenario, $this->now);
+        $min_date = $this->zipModel->getMinDelivTimeStampYamato($this->now);
+        $max_date = $this->zipModel->getMaxDelivTimeStampYamato($this->now, $days);
+        $stamp    = strtotime($this->$attribute);
+
+        // 休業対応
+        if($this->now >= strtotime('2019-12-27 12:00:00') && $this->now <= strtotime('2020-01-06 00:00:00')) {
+            return true;
+        }
+
+        if(date('Y-m-d',$stamp) < date('Y-m-d',$min_date))
+        {
+            $this->addError($attribute, sprintf("ご指定の住所への最短お届け日は %s です。", date('Y-m-d', $min_date)));
+            return false;
+        }
+
+        if (date('Y-m-d',$stamp) > date('Y-m-d', $max_date))
+        {
+            $this->addError($attribute, sprintf("ご指定の住所への最長お届け日は %s です。", date('Y-m-d', $max_date)));
+            return false;
+        }
+    }
+
+    public function validateTime($attribute, $params)
+    {
+        if(! $this->date || $this->hasErrors('date'))
+            return; // skip validate, treat as validation success
+
+        if(0 == $this->$attribute) // time_id == 指定なし
+        {
+            if($this->hasErrors($attribute))
+                $this->clearErrors($attribute);
+
+            $this->$attribute = 0; // fill with zero in case it is null
+            return; // validation success
+        }
+
+        $target = $this->zipModel->getMinDelivTimeStampYamato($this->now);
+        $stamp  = strtotime(date('Y-m-d 00:00:00', strtotime($this->date)));
+        $stamp += $this->timeModel->lapse;
+
+        // 休業対応
+        if($this->now >= strtotime('2019-11-01 12:00:00') && $this->now <= strtotime('2019-11-08 00:00:00')) {
+            return true;
+        }
+
+        if($stamp < $target)
+            $this->addError($attribute, sprintf("ご指定の住所・希望日での最短お届け時間は %s 時です。", date('H', $target)));
+    }
+
+    public function beforeValidate()
+    {
+
+        if(! parent::beforeValidate())
+            return false;
+
+        $this->now = null; // i want default value to be set
+
+        return true;
+    }
+
+    /**
+     * @return void
+     */
+    public function afterValidate()
+    {
+        parent::afterValidate();
+    }
+
+}

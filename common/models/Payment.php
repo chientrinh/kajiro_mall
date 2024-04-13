@@ -1,0 +1,137 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "mtb_payment".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/Payment.php $
+ * $Id: Payment.php 4118 2019-02-20 06:50:25Z kawai $
+ *
+ * @property integer $payment_id
+ * @property string $name
+ *
+ * @property DtbPurchase[] $dtbPurchases
+ */
+class Payment extends \yii\db\ActiveRecord
+{
+    const PKEY_CASH           = 1; // 現金
+    const PKEY_YAMATO_COD     = 2; // ヤマト便 代引
+    const PKEY_BANK_TRANSFER  = 3; // 銀行振込
+    const PKEY_DIRECT_DEBIT   = 4; // 口座振替
+    const PKEY_DROP_SHIPPING  = 5; // 代行発送
+    const PKEY_POSTAL_COD     = 6; // ゆうメール代引 Cash On Delivery
+    const PKEY_PARCEL_COD     = 7; // ゆうパック代引 Cash On Delivery
+    const PKEY_NO_CHARGE      = 9; // 支払い不要
+    const PKEY_CREDIT_CARD    = 10; // クレジットカード
+    const PKEY_POINT    = 8; // 
+    const PKEY_SETAGAYA_PAY    = 8; //  世田谷ペイ
+    const PKEY_GIFT_CERTIFICATE    = 12; // 　商品券   || 商券
+    const PKEY_HOTPEPPER_POINT   = 13; //  ホットペッパーPt   || ホpt
+    const PKEY_GNAVI_POINT   = 14; //  　ぐるなびPt || ぐpt
+    const PKEY_OTHER          = 99; // その他
+
+    /**
+     * @inheritdoc
+     */
+    public static function tableName()
+    {
+        return 'mtb_payment';
+    }
+
+    public function behaviors()
+    {
+        return [
+            'log' => [
+                'class'  => ChangeLogger::className(),
+                'owner'  => $this,
+                'user'   => Yii::$app->has('user') ? Yii::$app->user : null,
+            ],
+        ];
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function find()
+    {
+        return new PaymentQuery(get_called_class());
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function rules()
+    {
+        return [
+            [['payment_id', 'name'], 'required'],
+            [['payment_id'], 'integer'],
+            [['name'], 'string', 'max' => 255]
+        ];
+    }
+
+    public function scenarios()
+    {
+        $scenarios = parent::scenarios();
+        $scenarios['default'] = ['payment_id', 'name', 'delivery', 'datetime', 'handling'];
+        return $scenarios;
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public function attributeLabels()
+    {
+        return [
+            'payment_id' => 'Payment ID',
+            'name'       => 'Name',
+            'delivery'   => '配達指定',
+            'datetime'   => '日時指定',
+        ];
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getDtbPurchases()
+    {
+        return $this->hasMany(DtbPurchase::className(), ['payment_id' => 'payment_id']);
+    }
+}
+
+class PaymentQuery extends \yii\db\ActiveQuery
+{
+    public function selectPayment()
+    {
+        $payment_list = [
+            \common\models\Payment::PKEY_CASH,
+            \common\models\Payment::PKEY_YAMATO_COD,
+            \common\models\Payment::PKEY_BANK_TRANSFER,
+            \common\models\Payment::PKEY_DIRECT_DEBIT,
+            \common\models\Payment::PKEY_CREDIT_CARD,
+        ];
+        return $this->andWhere(['payment_id' => $payment_list]);
+    }
+    
+    /**
+     * 売上集計機能用の支払い方法取得
+     */
+    public function selectPaymentForSummary()
+    {
+        $payment_list = [
+            \common\models\Payment::PKEY_CASH,
+            \common\models\Payment::PKEY_YAMATO_COD,
+            \common\models\Payment::PKEY_BANK_TRANSFER,
+            \common\models\Payment::PKEY_DIRECT_DEBIT,
+            \common\models\Payment::PKEY_SETAGAYA_PAY,
+            \common\models\Payment::PKEY_CREDIT_CARD,
+            \common\models\Payment::PKEY_GIFT_CERTIFICATE,
+            \common\models\Payment::PKEY_GNAVI_POINT,
+            \common\models\Payment::PKEY_HOTPEPPER_POINT,
+            \common\models\Payment::PKEY_OTHER,
+        ];
+        return $this->andWhere(['payment_id' => $payment_list]);
+    }       
+}

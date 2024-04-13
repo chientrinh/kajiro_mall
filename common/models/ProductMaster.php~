@@ -1,0 +1,235 @@
+<?php
+
+namespace common\models;
+
+use Yii;
+
+/**
+ * This is the model class for table "vtb_product_master".
+ *
+ * $URL: https://tarax.toyouke.com/svn/MALL/common/models/ProductMaster.php $
+ * $Id: ProductMaster.php 2379 2016-04-07 00:44:20Z mori $
+ *
+ * @property integer $category_id
+ * @property integer $product_id
+ * @property integer $remedy_id
+ * @property integer $potency_id
+ * @property integer $vial_id
+ */
+class ProductMaster extends \yii\db\ActiveRecord
+{
+    /* @inheritdoc */
+    public static function tableName()
+    {
+        return 'mvtb_product_master';
+    }
+
+    /* @inheritdoc */
+    public function rules()
+    {
+        return [
+            [['ean13', 'category_id', 'company_id', 'product_id', 'remedy_id', 'potency_id', 'vial_id', 'restrict_id','price'], 'integer'],
+            [['kana'],'string'],
+            [['in_stock'],'boolean'],
+        ];
+    }
+
+    /* @inheritdoc */
+    public function attributeLabels()
+    {
+        return [
+            'category_id' => 'Category ID',
+            'company_id'  => '販社',
+            'product_id'  => 'Product ID',
+            'remedy_id'   => 'Remedy ID',
+            'potency_id'  => "ポテンシー",
+            'vial_id'     => "容器",
+            'restrict_id' => "公開区分",
+            'in_stock'    => "在庫",
+        ];
+    }
+
+    /* @inheritdoc */
+    public static function find()
+    {
+        return new ProductMasterQuery(get_called_class());
+    }
+
+    public function getCategory()
+    {
+        return $this->hasOne(Category::className(), ['category_id' => 'category_id']);
+    }
+
+    public function getCompany()
+    {
+        return $this->hasOne(Company::className(), ['company_id' => 'seller_id'])
+            ->viaTable(Category::tableName(), ['category_id' => 'category_id']);
+    }
+
+    public function getExcerpt()
+    {
+        if($this->product)
+            return $this->product->excerpt;
+        /* 
+           if($this->remedy)
+           return $this->remedy->excerpt; */
+    }
+
+    public function getImage()
+    {
+        if($images = $this->images)
+            return array_shift($images);
+
+        return null;
+    }
+
+    public function getImages()
+    {
+        if($this->product)
+            return $this->product->images;
+        if($this->stock)
+            return $this->stock->images;
+    }
+
+    public function getModel()
+    {
+        if($this->product_id)
+            return $this->hasOne(Product::className(), ['product_id' => 'product_id']);
+        else
+            return $this->hasOne(RemedyStock::className(), [
+                'remedy_id' => 'remedy_id',
+                'potency_id'=> 'potency_id',
+                'vial_id'   => 'vial_id',
+            ]);
+    }
+
+    public function getName()
+    {
+        if($this->product)
+            return $this->product->name;
+
+        if($this->remedy)
+            return $this->remedy->name;
+
+        return null;
+    }
+
+    public function getPickcode()
+    {
+        if($this->product)
+            return $this->product->pickcode;
+
+        if($this->stock)
+            return $this->stock->pickcode;
+    }
+
+    public function getPrice()
+    {
+        return \yii\helpers\ArrayHelper::getValue($this->model, 'price');
+    }
+
+    public function getProduct()
+    {
+        return $this->hasOne(Product::className(), ['product_id' => 'product_id']);
+    }
+
+    public function getRemedy()
+    {
+        return $this->hasOne(Remedy::className(), ['remedy_id' => 'remedy_id']);
+    }
+
+    public function getRestriction()
+    {
+        return $this->hasOne(ProductRestriction::className(), ['restrict_id' => 'restrict_id']);
+    }
+
+    public function getStock()
+    {
+        return $this->hasOne(RemedyStock::className(),[
+            'remedy_id' => 'remedy_id',
+            'potency_id'=> 'potency_id',
+            'vial_id'   => 'vial_id',
+        ]);
+    }
+
+    /**
+     * @return \yii\db\ActiveQuery
+     */
+    public function getSubcategories()
+    {
+        return $this->hasMany(Subcategory::className(), ['subcategory_id' => 'subcategory_id'])
+                    ->viaTable(ProductSubcategory::tableName(), ['ean13' => 'ean13']);
+    }
+
+    public function getUrl()
+    {
+        if($this->product_id)
+            return \yii\helpers\Url::to(['/product/view','id'=>$this->product_id]);
+
+        if($this->remedy)
+            return \yii\helpers\Url::to(['/remedy/viewbyname', 'name'=>$this->remedy->name]);
+
+        return null;
+    }
+
+    public function isLiquor()
+    {
+        if(! $this->model)
+        {
+            Yii::error([
+                sprintf('could not get model from (%s)', $this->name),
+                $this->attributes,
+            ], self::className().'::'.__FUNCTION__);
+            return false;
+        }
+
+        return $this->model->isLiquor();
+    }
+
+    public function isProduct()
+    {
+        return ! isset($this->remedy_id);
+    }
+
+    public function isRemedy()
+    {
+        return (Category::REMEDY == $this->category_id);
+    }
+}
+
+/**
+ * ActiveQuery for ProductMaster
+ */
+class ProductMasterQuery extends \yii\db\ActiveQuery
+{
+    public function init()
+    {
+        parent::init();
+    }
+
+    public function remedy()
+    {
+        return $this->andWhere(['mvtb_product_master.category_id' => Category::REMEDY]);
+    }
+
+    public function company($pk)
+    {
+        return $this->andWhere(['mvtb_product_master.category_id' =>
+            Category::find()->where(['seller_id'=>$pk])->select('category_id')
+        ]);
+    }
+
+    public function category($id)
+    {
+        return $this->andWhere(['mvtb_product_master.category_id' => $id]);
+    }
+
+    public function restrict($customer=null)
+    {
+        if(! $customer)
+            return $this->andWhere('mvtb_product_master.restrict_id = 0');
+
+        return $this->andFilterWhere(['>=', 'mvtb_product_master.restrict_id', $customer->grade_id]);
+    }
+
+}
